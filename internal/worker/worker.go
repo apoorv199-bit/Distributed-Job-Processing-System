@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apoorv/distributed-job-processor/config"
 	"github.com/apoorv/distributed-job-processor/internal/domain"
 	"github.com/apoorv/distributed-job-processor/internal/metrics"
 	"github.com/apoorv/distributed-job-processor/internal/ratelimiter"
@@ -40,7 +41,6 @@ type Worker struct {
 
 	redis       *redisrepo.Client
 	rateLimiter *ratelimiter.RateLimiter
-	rateLimit   int // max jobs/sec per queue (0 = unlimited)
 }
 
 type Config struct {
@@ -48,7 +48,7 @@ type Config struct {
 	Queues            []string
 	Concurrency       int
 	VisibilityTimeout time.Duration
-	RateLimit         int
+	RateLimitConfig   config.RateLimitConfig
 }
 
 func New(cfg Config, db *postgres.DB, redis *redisrepo.Client, registry *Registry, log *slog.Logger) *Worker {
@@ -68,8 +68,7 @@ func New(cfg Config, db *postgres.DB, redis *redisrepo.Client, registry *Registr
 		log:               log,
 		semaphore:         make(chan struct{}, cfg.Concurrency),
 		visibilityTimeout: cfg.VisibilityTimeout,
-		rateLimiter:       ratelimiter.New(redis.Raw()),
-		rateLimit:         cfg.RateLimit,
+		rateLimiter:       ratelimiter.New(redis.Raw(), cfg.RateLimitConfig),
 	}
 }
 
@@ -182,16 +181,20 @@ func (w *Worker) pollLoop(ctx context.Context, slot int) {
 // Postgres fallback ensures no job is ever lost if Redis restarts.
 func (w *Worker) dequeueFromAnyQueue(ctx context.Context) *domain.Job {
 	for _, queue := range w.queues {
-		// Rate limit check — skip this queue if over limit
-		if w.rateLimit > 0 {
-			allowed, err := w.rateLimiter.Allow(ctx, queue, w.rateLimit, time.Second)
-			if err != nil {
-				w.log.Warn("ratelimit.check_error", "queue", queue, "error", err)
-			}
-			if !allowed {
-				w.log.Debug("ratelimit.throttled", "queue", queue)
-				continue
-			}
+		// ── Queue-level rate limit check (before dequeue) ─────────────────
+		// We don't know the job type yet, so only check queue limit here.
+		// Job-type limit is checked in executeJob after we fetch the job.
+		result, err := w.rateLimiter.Allow(ctx, queue, "")
+		if err != nil {
+			w.log.Warn("ratelimit.error", "queue", queue, "error", err)
+			// fail open — continue processing
+		}
+		if !result.Allowed {
+			w.log.Debug("ratelimit.queue_throttled",
+				"queue", queue,
+				"limit", result.QueueLimit,
+			)
+			continue
 		}
 
 		// ── Redis fast path ──────────────────────────────────────────────
@@ -255,6 +258,27 @@ func (w *Worker) dequeueFromAnyQueue(ctx context.Context) *domain.Job {
 
 func (w *Worker) executeJob(ctx context.Context, job *domain.Job) {
 	start := time.Now()
+
+	// ── Job-type rate limit check ─────────────────────────────────────────
+	// Now we know the job type, check the per-type limit.
+	result, err := w.rateLimiter.Allow(ctx, job.Queue, job.JobType)
+	if err != nil {
+		w.log.Warn("ratelimit.jobtype_error", "job_id", job.ID, "error", err)
+	}
+	if !result.Allowed {
+		w.log.Info("ratelimit.jobtype_throttled",
+			"job_id", job.ID,
+			"job_type", job.JobType,
+			"queue", job.Queue,
+			"limit", result.JobTypeLimit,
+		)
+		// Put the job back — reschedule 1 second from now
+		if err := w.db.RescheduleRetry(ctx, job.ID, time.Now().Add(1*time.Second)); err != nil {
+			w.log.Error("ratelimit.reschedule_failed", "job_id", job.ID, "error", err)
+		}
+		_ = w.redis.RemoveInflight(ctx, job.Queue, job.ID)
+		return
+	}
 
 	// Give each job a reasonable execution timeout.
 	jobCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
