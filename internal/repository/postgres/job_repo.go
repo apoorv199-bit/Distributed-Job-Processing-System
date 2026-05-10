@@ -333,6 +333,39 @@ func (db *DB) QueueStats(ctx context.Context, queue string) (map[string]int, err
 	return stats, nil
 }
 
+// ListPendingForSync returns pending jobs for a queue that run_at has passed.
+// Used by the Postgres sync loop to find jobs that should be in Redis but aren't.
+// Limit is applied so we never load unbounded rows.
+func (db *DB) ListPendingForSync(ctx context.Context, queue string, limit int) ([]*domain.Job, error) {
+	const q = `
+		SELECT id, job_type, queue, payload, status, priority,
+		       max_attempts, attempt_count, run_at,
+		       started_at, completed_at, failed_at,
+		       worker_id, last_error, created_at, updated_at
+		FROM jobs
+		WHERE queue  = $1
+		  AND status = 'pending'
+		  AND run_at <= NOW()
+		ORDER BY priority ASC, run_at ASC
+		LIMIT $2`
+
+	rows, err := db.pool.Query(ctx, q, queue, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending for sync: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []*domain.Job
+	for rows.Next() {
+		job, err := scanJobFromRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, nil
+}
+
 // -----------------------------------------------------------------------
 // Scan helpers — keep scanning logic in one place
 // -----------------------------------------------------------------------

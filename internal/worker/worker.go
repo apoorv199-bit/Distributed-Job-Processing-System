@@ -90,6 +90,10 @@ func (w *Worker) Start(ctx context.Context) {
 	// Reaper: periodically recover jobs from crashed workers.
 	go w.reaperLoop(ctx)
 
+	// Postgres sync: periodically re-enqueues jobs that are in Postgres
+	// but missing from Redis (e.g. Redis restart, missed enqueue)
+	go w.postgresSyncLoop(ctx)
+
 	// Block until context cancelled (SIGTERM / SIGINT from main).
 	<-ctx.Done()
 	w.log.Info("worker.draining", "worker_id", w.id)
@@ -124,10 +128,10 @@ func (w *Worker) pollLoop(ctx context.Context, slot int) {
 		default:
 		}
 
-		job := w.dequeueFromAnyQueue(ctx)
+		// Primary path: Redis only
+		// Postgres fallback is handled separately by postgresSyncLoop
+		job := w.dequeueFromRedis(ctx)
 		if job == nil {
-			// All queues empty — back off before polling again.
-			// This prevents hammering Postgres when idle.
 			select {
 			case <-ctx.Done():
 				return
@@ -160,34 +164,22 @@ func (w *Worker) pollLoop(ctx context.Context, slot int) {
 	}
 }
 
-// dequeueFromAnyQueue polls queues in priority order and returns the first job found.
-// func (w *Worker) dequeueFromAnyQueue(ctx context.Context) *domain.Job {
-// 	for _, queue := range w.queues {
-// 		job, err := w.db.Dequeue(ctx, queue, w.id)
-// 		if err != nil {
-// 			w.log.Error("dequeue.error", "queue", queue, "error", err)
-// 			continue
-// 		}
-// 		if job != nil {
-// 			w.log.Info("job.dequeued", "job_id", job.ID, "job_type", job.JobType, "queue", queue, "attempt", job.AttemptCount)
-// 			return job
-// 		}
-// 	}
-// 	return nil
-// }
+// -----------------------------------------------------------------------
+// Dequeue — Redis only (primary path)
+// -----------------------------------------------------------------------
 
-// dequeueFromAnyQueue tries Redis first (fast path), falls back to Postgres.
-// Redis gives us priority ordering and avoids table scans.
-// Postgres fallback ensures no job is ever lost if Redis restarts.
-func (w *Worker) dequeueFromAnyQueue(ctx context.Context) *domain.Job {
+// dequeueFromRedis pops one job from Redis, then marks it running in
+// Postgres atomically. This is the only path during normal operation.
+//
+// Contract: returns a job already marked status=running in Postgres,
+// or nil if all queues are empty.
+func (w *Worker) dequeueFromRedis(ctx context.Context) *domain.Job {
 	for _, queue := range w.queues {
-		// ── Queue-level rate limit check (before dequeue) ─────────────────
-		// We don't know the job type yet, so only check queue limit here.
-		// Job-type limit is checked in executeJob after we fetch the job.
+
+		// Rate limit: queue-level check before we even touch Redis
 		result, err := w.rateLimiter.Allow(ctx, queue, "")
 		if err != nil {
 			w.log.Warn("ratelimit.error", "queue", queue, "error", err)
-			// fail open — continue processing
 		}
 		if !result.Allowed {
 			w.log.Debug("ratelimit.queue_throttled",
@@ -197,70 +189,139 @@ func (w *Worker) dequeueFromAnyQueue(ctx context.Context) *domain.Job {
 			continue
 		}
 
-		// ── Redis fast path ──────────────────────────────────────────────
+		// Pop highest-priority job ID from Redis sorted set
 		jobID, err := w.redis.Dequeue(ctx, queue)
 		if err != nil {
 			w.log.Error("redis.dequeue_error", "queue", queue, "error", err)
-			// Fall through to Postgres
-		}
-
-		if jobID != "" {
-			// Mark inflight in Redis for crash safety
-			if err := w.redis.MarkInflight(ctx, queue, jobID, w.visibilityTimeout); err != nil {
-				w.log.Warn("redis.inflight_mark_error", "job_id", jobID, "error", err)
-			}
-
-			// Fetch full job from Postgres and mark running atomically
-			job, err := w.db.MarkRunning(ctx, jobID, w.id)
-			if err != nil {
-				w.log.Error("db.mark_running_failed",
-					"job_id", jobID,
-					"queue", queue,
-					"error", err,
-				)
-				// Job was already popped from Redis — remove inflight entry
-				_ = w.redis.RemoveInflight(ctx, queue, jobID)
-				continue
-			}
-
-			w.log.Info("job.dequeued_redis",
-				"job_id", job.ID,
-				"job_type", job.JobType,
-				"queue", queue,
-				"attempt", job.AttemptCount,
-			)
-			return job
-		}
-
-		// ── Postgres fallback ────────────────────────────────────────────
-		// Catches jobs that were written to Postgres but missed Redis
-		// (e.g., Redis restarted, or job submitted before Redis was available)
-		job, err := w.db.Dequeue(ctx, queue, w.id)
-		if err != nil {
-			w.log.Error("db.dequeue_error", "queue", queue, "error", err)
 			continue
 		}
-		if job != nil {
-			w.log.Info("job.dequeued_postgres_fallback",
-				"job_id", job.ID,
-				"job_type", job.JobType,
-				"queue", queue,
-			)
-			return job
+		if jobID == "" {
+			continue // queue empty, try next
 		}
+
+		// Track in Redis inflight set for crash recovery
+		if err := w.redis.MarkInflight(ctx, queue, jobID, w.visibilityTimeout); err != nil {
+			w.log.Warn("redis.inflight_mark_error",
+				"job_id", jobID,
+				"error", err,
+			)
+		}
+
+		// Atomically claim the job in Postgres
+		// MarkRunning: UPDATE jobs SET status='running' WHERE id=$1 AND status='pending'
+		job, err := w.db.MarkRunning(ctx, jobID, w.id)
+		if err != nil {
+			// Job may have been picked up by another worker (should not happen
+			// with Redis ZPOPMIN but defensive check is worth keeping)
+			w.log.Error("redis_path.mark_running_failed",
+				"job_id", jobID,
+				"queue", queue,
+				"error", err,
+			)
+			_ = w.redis.RemoveInflight(ctx, queue, jobID)
+			continue
+		}
+
+		w.log.Info("job.dequeued",
+			"job_id", job.ID,
+			"job_type", job.JobType,
+			"queue", queue,
+			"attempt", job.AttemptCount,
+			"source", "redis",
+		)
+		return job
 	}
 	return nil
+}
+
+// -----------------------------------------------------------------------
+// Postgres sync loop — recovery path only
+// -----------------------------------------------------------------------
+
+// postgresSyncLoop runs every 30 seconds and finds jobs that are pending
+// in Postgres but absent from Redis — then re-enqueues them into Redis.
+//
+// This handles:
+//   - Redis restart (all queues lost)
+//   - Network partition during Submit (job saved to DB but Redis push failed)
+//   - Any other edge case where the two stores drift
+//
+// It does NOT directly execute jobs — it only re-enqueues them into Redis
+// so the normal pollLoop picks them up. This keeps the execution path clean.
+func (w *Worker) postgresSyncLoop(ctx context.Context) {
+	// Delay first sync so startup doesn't flood logs
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(10 * time.Second):
+	}
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.syncPostgresToRedis(ctx)
+		}
+	}
+}
+
+func (w *Worker) syncPostgresToRedis(ctx context.Context) {
+	for _, queue := range w.queues {
+		// Find pending jobs in Postgres that should be in Redis
+		jobs, err := w.db.ListPendingForSync(ctx, queue, 100)
+		if err != nil {
+			w.log.Error("postgres_sync.list_failed",
+				"queue", queue,
+				"error", err,
+			)
+			continue
+		}
+		if len(jobs) == 0 {
+			continue
+		}
+
+		synced := 0
+		for _, job := range jobs {
+			// Re-enqueue into Redis — ZADD NX so we don't overwrite
+			// a valid existing entry (NX = only add if not exists)
+			if err := w.redis.EnqueueIfAbsent(ctx, job.Queue, job.ID, job.Priority, job.RunAt); err != nil {
+				w.log.Warn("postgres_sync.enqueue_failed",
+					"job_id", job.ID,
+					"error", err,
+				)
+				continue
+			}
+			synced++
+		}
+
+		if synced > 0 {
+			w.log.Warn("postgres_sync.requeued",
+				"queue", queue,
+				"count", synced,
+				"reason", "jobs found in postgres missing from redis",
+			)
+		}
+	}
 }
 
 // -----------------------------------------------------------------------
 // Job execution
 // -----------------------------------------------------------------------
 
+// executeJob runs a job that is ALREADY marked running in Postgres.
+// Never call MarkRunning here — dequeueFromRedis already did it.
 func (w *Worker) executeJob(ctx context.Context, job *domain.Job) {
 	start := time.Now()
 
-	// ── Job-type rate limit check ─────────────────────────────────────────
-	// Now we know the job type, check the per-type limit.
+	// Give each job a reasonable execution timeout.
+	jobCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	// Job-type rate limit — checked after we know the type
 	result, err := w.rateLimiter.Allow(ctx, job.Queue, job.JobType)
 	if err != nil {
 		w.log.Warn("ratelimit.jobtype_error", "job_id", job.ID, "error", err)
@@ -279,10 +340,6 @@ func (w *Worker) executeJob(ctx context.Context, job *domain.Job) {
 		_ = w.redis.RemoveInflight(ctx, job.Queue, job.ID)
 		return
 	}
-
-	// Give each job a reasonable execution timeout.
-	jobCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
 
 	handler, err := w.registry.Get(job.JobType)
 	if err != nil {
@@ -304,7 +361,7 @@ func (w *Worker) executeJob(ctx context.Context, job *domain.Job) {
 		return
 	}
 
-	// Handler returned an error — decide: retry or give up?
+	// Exhausted all attempts → DLQ
 	if job.AttemptCount >= job.MaxAttempts {
 		w.log.Warn("job.exhausted",
 			"job_id", job.ID,
@@ -313,9 +370,6 @@ func (w *Worker) executeJob(ctx context.Context, job *domain.Job) {
 			"max_attempts", job.MaxAttempts,
 			"error", err,
 		)
-
-		// Phase 3 will move this to DLQ. For now, mark as dead.
-		// w.failJob(ctx, job, fmt.Errorf("exhausted after %d attempts: %w", job.AttemptCount, err), start)
 
 		dlqErr := err.Error()
 		if _, moveErr := w.db.MoveToDLQ(ctx, job, dlqErr); moveErr != nil {
@@ -358,6 +412,16 @@ func (w *Worker) executeJob(ctx context.Context, job *domain.Job) {
 		w.log.Error("job.reschedule_failed", "job_id", job.ID, "error", retryErr)
 	}
 
+	// Re-enqueue into Redis with the future run_at — scheduler will promote it
+	if err := w.redis.Enqueue(ctx, job.Queue, job.ID, job.Priority, nextRun); err != nil {
+		w.log.Warn("retry.redis_enqueue_failed",
+			"job_id", job.ID,
+			"error", err,
+		)
+		// Postgres sync loop will catch it in 30s
+	}
+
+	_ = w.redis.RemoveInflight(ctx, job.Queue, job.ID)
 	w.recordAttempt(ctx, job, start, "failed", err.Error())
 
 	// Count each retry so you can alert on retry storms
