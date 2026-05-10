@@ -19,6 +19,7 @@ type Config struct {
 	// Visibility timeout: jobs stuck in 'running' longer than this get reset
 	VisibilityTimeoutMinutes     int
 	SchedulerPollIntervalSeconds int
+	APIKey                       string
 }
 
 func Load() (*Config, error) {
@@ -32,6 +33,7 @@ func Load() (*Config, error) {
 		WorkerRateLimit:              getEnvInt("WORKER_RATE_LIMIT", 0),
 		VisibilityTimeoutMinutes:     getEnvInt("VISIBILITY_TIMEOUT_MINUTES", 10),
 		SchedulerPollIntervalSeconds: getEnvInt("SCHEDULER_POLL_INTERVAL_SECONDS", 1),
+		APIKey:                       getEnv("API_KEY", "apoorvsahu123456"),
 	}
 
 	if cfg.DatabaseURL == "" {

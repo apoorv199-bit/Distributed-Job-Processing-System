@@ -30,7 +30,7 @@ func main() {
 
 	// ── Logger ────────────────────────────────────────────────────────────
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(log)
 
@@ -131,8 +131,9 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
+	r.Use(customMiddleware.PanicRecovery(log))
 	r.Use(customMiddleware.RequestLogger(log))
+	r.Use(customMiddleware.APIKeyAuth(cfg.APIKey, log))
 
 	jobH := apihandler.NewJobHandler(jobSvc, log)
 	dlqH := apihandler.NewDLQHandler(dlqSvc, log)
