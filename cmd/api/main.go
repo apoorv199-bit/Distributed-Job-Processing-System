@@ -35,7 +35,7 @@ func main() {
 	slog.SetDefault(log)
 
 	// ── Load ENV ────────────────────────────────────────────────────────────
-	err := godotenv.Load()
+	err := godotenv.Load("../../.env")
 	if err != nil {
 		log.Warn("env.load_failed", "error", err)
 	}
@@ -88,7 +88,7 @@ func main() {
 		Queues:            cfg.WorkerQueues,
 		Concurrency:       cfg.WorkerConcurrency,
 		VisibilityTimeout: time.Duration(cfg.VisibilityTimeoutMinutes) * time.Minute,
-		RateLimit:         cfg.WorkerRateLimit,
+		RateLimitConfig:   cfg.RateLimit,
 	}, db, redisClient, registry, log)
 
 	sched := scheduler.New(scheduler.Config{
