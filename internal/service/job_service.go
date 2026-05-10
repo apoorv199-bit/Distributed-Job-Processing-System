@@ -41,12 +41,18 @@ func (s *JobService) Submit(ctx context.Context, req *domain.SubmitRequest) (*do
 	// Enqueue to Redis — if this fails, the Postgres fallback in the worker
 	// will still pick it up. Never block job submission over Redis failure.
 	if err := s.redis.Enqueue(ctx, job.Queue, job.ID, job.Priority, job.RunAt); err != nil {
-		s.log.Warn("redis.enqueue_failed",
+		s.log.Error("redis.enqueue_failed",
 			"job_id", job.ID,
 			"queue", job.Queue,
 			"error", err,
+			"impact", "worker will fall back to postgres polling — higher latency",
 		)
 		// Non-fatal: worker will fall back to Postgres SKIP LOCKED
+	} else {
+		s.log.Debug("redis.enqueued",
+			"job_id", job.ID,
+			"queue", job.Queue,
+		)
 	}
 
 	metrics.JobsEnqueued.WithLabelValues(job.JobType, job.Queue).Inc()
