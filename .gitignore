@@ -1,0 +1,102 @@
+# ------------------------------
+# Go
+# ------------------------------
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# Vendor (optional)
+vendor/
+
+# ------------------------------
+# Environment & Secrets
+# ------------------------------
+.env
+.env.*
+!.env.example
+
+# Config overrides
+config.local.*
+config.dev.*
+
+# Secrets / keys
+*.pem
+*.key
+*.crt
+
+# ------------------------------
+# Logs
+# ------------------------------
+logs/
+*.log
+
+# ------------------------------
+# IDE / Editor
+# ------------------------------
+
+# VSCode
+.vscode/
+
+# JetBrains
+.idea/
+
+# Vim
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# ------------------------------
+# Docker
+# ------------------------------
+docker-data/
+tmp/
+
+# Docker volumes
+pgdata/
+redis-data/
+grafana-data/
+
+# ------------------------------
+# Prometheus / Grafana
+# ------------------------------
+prometheus-data/
+grafana-storage/
+
+# ------------------------------
+# Test / Benchmark
+# ------------------------------
+*.prof
+*.pprof
+cpu.out
+mem.out
+benchmark.txt
+
+# ------------------------------
+# Generated files
+# ------------------------------
+*.gen.go
+mock_*.go
+
+# ------------------------------
+# Air (hot reload)
+# ------------------------------
+.air/
+
+# ------------------------------
+# OS files
+# ------------------------------
+Thumbs.db

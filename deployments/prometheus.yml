@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 15s # pull metrics every 15s
+  evaluation_interval: 15s # evaluate alerting rules every 15s
+
+# ── Alerting rules (optional — extend later) ─────────────────────────────────
+# rule_files:
+#   - "alerts.yml"
+
+# ── Scrape targets ────────────────────────────────────────────────────────────
+scrape_configs:
+  # Your Go application — exposes /metrics via promhttp.Handler()
+  - job_name: job-processor
+    static_configs:
+      - targets: ["app:8085"]
+    metrics_path: /metrics
+    scrape_interval: 10s # more frequent than global for job metrics
+
+  # Prometheus scrapes itself — useful for debugging scrape health
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
