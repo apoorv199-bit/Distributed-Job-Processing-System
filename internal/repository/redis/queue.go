@@ -170,6 +170,23 @@ func (c *Client) PromoteScheduled(ctx context.Context, queue string, priority in
 	return len(ready), nil
 }
 
+// EnqueueIfAbsent adds a job to the Redis queue only if it isn't already there.
+// Uses ZADD NX — no-op if the member already exists.
+// Called by the Postgres sync loop to recover missed enqueues without
+// creating duplicates.
+func (c *Client) EnqueueIfAbsent(ctx context.Context, queue, jobID string, priority int, runAt time.Time) error {
+	if runAt.After(time.Now()) {
+		return c.rdb.ZAddNX(ctx, scheduledKey(queue), redis.Z{
+			Score:  float64(runAt.Unix()),
+			Member: jobID,
+		}).Err()
+	}
+	return c.rdb.ZAddNX(ctx, queueKey(queue), redis.Z{
+		Score:  Score(priority, runAt),
+		Member: jobID,
+	}).Err()
+}
+
 // -----------------------------------------------------------------------
 // Queue depth — used by metrics + health checks
 // -----------------------------------------------------------------------
