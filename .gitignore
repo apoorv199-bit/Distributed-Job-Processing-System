@@ -30,6 +30,8 @@ vendor/
 # Config overrides
 config.local.*
 config.dev.*
+config.yaml
+!config.example.yaml
 
 # Secrets / keys
 *.pem

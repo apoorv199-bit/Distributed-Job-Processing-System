@@ -28,13 +28,13 @@ import (
 
 func main() {
 
-	// ── Logger ────────────────────────────────────────────────────────────
+	// Logger
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(log)
 
-	// ── Load ENV ────────────────────────────────────────────────────────────
+	// Load ENV
 	err := godotenv.Load("../../.env")
 	if err != nil {
 		log.Warn("env.load_failed", "error", err)
@@ -43,14 +43,14 @@ func main() {
 	// Register Prometheus metrics at startup
 	metrics.Register()
 
-	// ── Config ────────────────────────────────────────────────────────────
+	// Config
 	cfg, err := config.Load()
 	if err != nil {
 		log.Error("config.load_failed", "error", err)
 		os.Exit(1)
 	}
 
-	// ── Database ──────────────────────────────────────────────────────────
+	// Database
 	ctx := context.Background()
 	db, err := postgres.New(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -75,11 +75,11 @@ func main() {
 	defer redisClient.Close()
 	log.Info("redis.connected")
 
-	// ── Services ──────────────────────────────────────────────────────────
+	// Services
 	jobSvc := service.NewJobService(db, redisClient, log)
 	dlqSvc := service.NewDLQService(db, log)
 
-	// ── Worker ────────────────────────────────────────────────────────────
+	// Worker
 	registry := worker.NewRegistry()
 	registerHandlers(registry, log) // register all job type handlers
 
@@ -127,7 +127,7 @@ func main() {
 		}
 	}()
 
-	// ── HTTP Router ───────────────────────────────────────────────────────
+	// HTTP Router
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -177,7 +177,7 @@ func main() {
 		fmt.Fprint(w, "ok")
 	})
 
-	// ── HTTP Server ───────────────────────────────────────────────────────
+	// HTTP Server
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      r,
@@ -186,7 +186,7 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// ── Graceful Shutdown ─────────────────────────────────────────────────
+	// Graceful Shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
@@ -213,10 +213,6 @@ func main() {
 
 	log.Info("shutdown.complete")
 }
-
-// -----------------------------------------------------------------------
-// Handler registration — add your job types here
-// -----------------------------------------------------------------------
 
 func registerHandlers(r *worker.Registry, log *slog.Logger) {
 	// send_email: sends a transactional email
