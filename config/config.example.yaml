@@ -1,0 +1,42 @@
+# Copy this file to:
+#
+#   config/config.yaml
+#
+# OR use environment variables in production.
+#
+# Environment variables always override YAML values.
+
+PORT: "8085"
+
+DATABASE_URL: "postgres://username:password@localhost:5432/jobprocessor?sslmode=disable"
+REDIS_URL: "localhost:6379"
+
+API_KEY: "your-api-key"
+
+# Unique worker identifier
+WORKER_ID: "worker-1"
+WORKER_CONCURRENCY: 10
+
+WORKER_QUEUES:
+  - critical
+  - default
+  - batch
+
+# Jobs stuck in running state longer than this are reset
+VISIBILITY_TIMEOUT_MINUTES: 10
+SCHEDULER_POLL_INTERVAL_SECONDS: 1
+
+RATE_LIMIT:
+  # Default fallback rate limit (jobs/sec)
+  DEFAULT: 100
+
+  # Per-queue rate limits
+  QUEUES:
+    critical: 200
+    default: 100
+    batch: 20
+
+  # Per-job-type rate limits
+  JOB_TYPES:
+    generate_report: 5
+    send_email: 50

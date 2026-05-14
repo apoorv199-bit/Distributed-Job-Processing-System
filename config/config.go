@@ -1,102 +1,147 @@
 package config
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"strconv"
+	"strings"
+
+	"github.com/spf13/viper"
 )
 
 type RateLimitConfig struct {
-	// Per-queue limits: max jobs/sec for the entire queue
-	// env: RATE_LIMIT_QUEUES={"critical":200,"default":100,"batch":20}
-	Queues map[string]int `json:"queues"`
-
-	// Per-job-type limits: max jobs/sec regardless of which queue
-	// env: RATE_LIMIT_JOB_TYPES={"send_email":50,"generate_report":5}
-	JobTypes map[string]int `json:"job_types"`
-
-	// Global fallback if no specific config matches
-	// env: RATE_LIMIT_DEFAULT=100
-	Default int `json:"default"`
+	Queues   map[string]int `mapstructure:"QUEUES"`
+	JobTypes map[string]int `mapstructure:"JOB_TYPES"`
+	Default  int            `mapstructure:"DEFAULT"` // Global fallback if no specific config matches
 }
 
 type Config struct {
-	Port        string
-	DatabaseURL string
-	RedisURL    string
-	APIKey      string
-
-	WorkerID          string
-	WorkerConcurrency int
-	WorkerQueues      []string // ordered: workers poll left to right
+	Port              string   `mapstructure:"PORT"`
+	DatabaseURL       string   `mapstructure:"DATABASE_URL"`
+	RedisURL          string   `mapstructure:"REDIS_URL"`
+	APIKey            string   `mapstructure:"API_KEY"`
+	WorkerID          string   `mapstructure:"WORKER_ID"`
+	WorkerConcurrency int      `mapstructure:"WORKER_CONCURRENCY"`
+	WorkerQueues      []string `mapstructure:"WORKER_QUEUES"`
 
 	// Visibility timeout: jobs stuck in 'running' longer than this get reset
-	VisibilityTimeoutMinutes     int
-	SchedulerPollIntervalSeconds int
-
-	RateLimit RateLimitConfig
+	VisibilityTimeoutMinutes     int             `mapstructure:"VISIBILITY_TIMEOUT_MINUTES"`
+	SchedulerPollIntervalSeconds int             `mapstructure:"SCHEDULER_POLL_INTERVAL_SECONDS"`
+	RateLimit                    RateLimitConfig `mapstructure:"RATE_LIMIT"`
 }
 
 func Load() (*Config, error) {
-	cfg := &Config{
-		Port:                         getEnv("PORT", "8085"),
-		DatabaseURL:                  getEnv("DATABASE_URL", "postgres://app:secret@localhost:5432/jobprocessor?sslmode=disable"),
-		RedisURL:                     getEnv("REDIS_URL", "localhost:6379"),
-		APIKey:                       getEnv("API_KEY", "apoorvsahu123456"),
-		WorkerID:                     getEnv("WORKER_ID", hostname()),
-		WorkerConcurrency:            getEnvInt("WORKER_CONCURRENCY", 10),
-		WorkerQueues:                 []string{"critical", "default", "batch"},
-		VisibilityTimeoutMinutes:     getEnvInt("VISIBILITY_TIMEOUT_MINUTES", 10),
-		SchedulerPollIntervalSeconds: getEnvInt("SCHEDULER_POLL_INTERVAL_SECONDS", 1),
-		RateLimit: RateLimitConfig{
-			Queues:   parseJSONMap("RATE_LIMIT_QUEUES", map[string]int{"critical": 200, "default": 100, "batch": 20}),
-			JobTypes: parseJSONMap("RATE_LIMIT_JOB_TYPES", map[string]int{"generate_report": 5}),
-			Default:  getEnvInt("RATE_LIMIT_DEFAULT", 100),
-		},
+	v := viper.New()
+
+	setDefaults(v)
+
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	v.AutomaticEnv()
+
+	v.SetConfigName("config")
+	v.SetConfigType("yaml")
+
+	v.AddConfigPath("./config")
+	v.AddConfigPath("../config")
+	v.AddConfigPath("../../config")
+
+	if err := v.ReadInConfig(); err != nil {
+		var notFound viper.ConfigFileNotFoundError
+
+		if !errors.As(err, &notFound) {
+			return nil, fmt.Errorf("failed to read config: %w", err)
+		}
 	}
 
-	if cfg.DatabaseURL == "" {
-		return nil, fmt.Errorf("DATABASE_URL is required")
+	cfg := &Config{}
+	if err := v.Unmarshal(cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode config: %w", err)
 	}
+
+	// Viper does not always decode comma-separated env values into []string,
+	// so preserve explicit WORKER_QUEUES env support.
+	if queues := v.GetString("WORKER_QUEUES"); queues != "" {
+		cfg.WorkerQueues = splitAndTrim(queues)
+	}
+
+	if cfg.WorkerID == "" {
+		cfg.WorkerID = hostname()
+	}
+
+	if err := validate(cfg); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
 }
 
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+func setDefaults(v *viper.Viper) {
+
+	v.SetDefault("PORT", "8085")
+
+	v.SetDefault("WORKER_CONCURRENCY", 10)
+
+	v.SetDefault("WORKER_QUEUES",
+		[]string{"critical", "default", "batch"},
+	)
+
+	v.SetDefault("VISIBILITY_TIMEOUT_MINUTES", 10)
+
+	v.SetDefault("SCHEDULER_POLL_INTERVAL_SECONDS", 1)
+
+	v.SetDefault("RATE_LIMIT.DEFAULT", 100)
+
+	v.SetDefault("RATE_LIMIT.QUEUES", map[string]int{
+		"critical": 200,
+		"default":  100,
+		"batch":    20,
+	})
+
+	v.SetDefault("RATE_LIMIT.JOB_TYPES", map[string]int{
+		"generate_report": 5,
+		"send_email":      50,
+	})
 }
 
-func getEnvInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+func validate(cfg *Config) error {
+	if cfg.DatabaseURL == "" {
+		return errors.New("DATABASE_URL is required")
 	}
-	return fallback
+
+	if cfg.RedisURL == "" {
+		return errors.New("REDIS_URL is required")
+	}
+
+	if cfg.APIKey == "" {
+		return errors.New("API_KEY is required")
+	}
+
+	return nil
 }
 
 func hostname() string {
-	h, _ := os.Hostname()
-	if h == "" {
+	h, err := os.Hostname()
+
+	if err != nil || h == "" {
 		return "worker-unknown"
 	}
+
 	return h
 }
 
-// parseJSONMap reads a JSON object from an env var.
-// e.g. RATE_LIMIT_QUEUES={"critical":200,"default":100}
-func parseJSONMap(key string, fallback map[string]int) map[string]int {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
+func splitAndTrim(s string) []string {
+	parts := strings.Split(s, ",")
+
+	result := make([]string, 0, len(parts))
+
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+
+		if p != "" {
+			result = append(result, p)
+		}
 	}
-	result := make(map[string]int)
-	if err := json.Unmarshal([]byte(v), &result); err != nil {
-		fmt.Printf("warn: failed to parse %s as JSON map, using defaults: %v\n", key, err)
-		return fallback
-	}
+
 	return result
 }
