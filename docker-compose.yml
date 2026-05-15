@@ -36,9 +36,15 @@ services:
       PORT: 8085
       DATABASE_URL: postgres://app:secret@postgres:5432/jobprocessor?sslmode=disable
       REDIS_URL: redis:6379
+      API_KEY: apoorvsahu123456
       WORKER_ID: docker-worker-1
       WORKER_CONCURRENCY: 10
-      WORKER_RATE_LIMIT: 100 # 100 jobs/sec per queue max
+      RATE_LIMIT_DEFAULT: 100
+      RATE_LIMIT_QUEUES_CRITICAL: 200
+      RATE_LIMIT_QUEUES_DEFAULT: 100
+      RATE_LIMIT_QUEUES_BATCH: 20
+      RATE_LIMIT_JOB_TYPES_GENERATE_REPORT: 5
+      RATE_LIMIT_JOB_TYPES_SEND_EMAIL: 50
       VISIBILITY_TIMEOUT_MINUTES: 10
       SCHEDULER_POLL_INTERVAL_SECONDS: 1
     depends_on:

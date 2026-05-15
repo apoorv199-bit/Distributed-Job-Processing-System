@@ -113,10 +113,6 @@ func (w *Worker) Start(ctx context.Context) {
 	}
 }
 
-// -----------------------------------------------------------------------
-// Poll loop
-// -----------------------------------------------------------------------
-
 func (w *Worker) pollLoop(ctx context.Context, slot int) {
 	w.log.Debug("poll_loop.started", "slot", slot)
 
@@ -163,10 +159,6 @@ func (w *Worker) pollLoop(ctx context.Context, slot int) {
 		}(job)
 	}
 }
-
-// -----------------------------------------------------------------------
-// Dequeue — Redis only (primary path)
-// -----------------------------------------------------------------------
 
 // dequeueFromRedis pops one job from Redis, then marks it running in
 // Postgres atomically. This is the only path during normal operation.
@@ -233,10 +225,6 @@ func (w *Worker) dequeueFromRedis(ctx context.Context) *domain.Job {
 	}
 	return nil
 }
-
-// -----------------------------------------------------------------------
-// Postgres sync loop — recovery path only
-// -----------------------------------------------------------------------
 
 // postgresSyncLoop runs every 30 seconds and finds jobs that are pending
 // in Postgres but absent from Redis — then re-enqueues them into Redis.
@@ -307,10 +295,6 @@ func (w *Worker) syncPostgresToRedis(ctx context.Context) {
 		}
 	}
 }
-
-// -----------------------------------------------------------------------
-// Job execution
-// -----------------------------------------------------------------------
 
 // executeJob runs a job that is ALREADY marked running in Postgres.
 // Never call MarkRunning here — dequeueFromRedis already did it.
@@ -486,10 +470,7 @@ func (w *Worker) recordAttempt(ctx context.Context, job *domain.Job, start time.
 	}
 }
 
-// -----------------------------------------------------------------------
-// Reaper — recovers stalled jobs from crashed workers
-// -----------------------------------------------------------------------
-
+// recovers stalled jobs from crashed workers
 func (w *Worker) reaperLoop(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
@@ -510,10 +491,6 @@ func (w *Worker) reaperLoop(ctx context.Context) {
 		}
 	}
 }
-
-// -----------------------------------------------------------------------
-// Backoff calculation
-// -----------------------------------------------------------------------
 
 // calcBackoff returns exponential backoff: base=10s, doubles each attempt.
 // attempt=1 → 20s, attempt=2 → 40s, attempt=3 → 80s, attempt=4 → 160s ...

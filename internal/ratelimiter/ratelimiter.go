@@ -11,7 +11,6 @@ import (
 
 // RateLimiter enforces per-queue AND per-job-type limits using a
 // sliding window Lua script. Both checks must pass for a job to proceed.
-//
 // Key structure:
 //
 //	ratelimit:queue:{name}:{bucket}     — queue-level window
@@ -78,7 +77,7 @@ func (rl *RateLimiter) Allow(ctx context.Context, queue, jobType string) (CheckR
 	result.QueueLimit = queueLimit
 	result.JobTypeLimit = jobTypeLimit
 
-	// ── Check queue-level limit ───────────────────────────────────────────
+	//Check queue-level limit
 	queueAllowed, err := rl.check(ctx, queueKey(queue), queueLimit)
 	if err != nil {
 		// Fail open — Redis error should not block job processing
@@ -90,7 +89,7 @@ func (rl *RateLimiter) Allow(ctx context.Context, queue, jobType string) (CheckR
 		return result, nil
 	}
 
-	// ── Check job-type-level limit ────────────────────────────────────────
+	// Check job-type-level limit
 	if jobTypeLimit > 0 {
 		jobTypeAllowed, err := rl.check(ctx, jobTypeKey(jobType), jobTypeLimit)
 		if err != nil {
@@ -123,8 +122,7 @@ func (rl *RateLimiter) check(ctx context.Context, key string, limit int) (bool, 
 	return val == 1, nil
 }
 
-// ── Limit resolution — specific config wins over default ─────────────────────
-
+// Limit resolution — specific config wins over default
 func (rl *RateLimiter) queueLimit(queue string) int {
 	if limit, ok := rl.cfg.Queues[queue]; ok {
 		return limit
@@ -139,7 +137,7 @@ func (rl *RateLimiter) jobTypeLimit(jobType string) int {
 	return 0 // 0 = no per-type limit unless explicitly configured
 }
 
-// ── Key builders ──────────────────────────────────────────────────────────────
+// Key builders
 
 func queueKey(queue string) string     { return "ratelimit:queue:" + queue }
 func jobTypeKey(jobType string) string { return "ratelimit:jobtype:" + jobType }

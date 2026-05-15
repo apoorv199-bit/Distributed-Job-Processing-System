@@ -11,16 +11,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// -----------------------------------------------------------------------
-// DLQ Write Operations
-// -----------------------------------------------------------------------
-
 // MoveToDLQ atomically:
 //  1. Inserts a record into dead_letter_jobs
 //  2. Updates the original job's status to 'dead'
 //
-// Both happen in a single transaction — you never get a dead job without
-// a DLQ entry, and never a DLQ entry for a non-dead job.
+// Both happen in a single transaction — you never get a dead job without a DLQ entry, and never a DLQ entry for a non-dead job.
 func (db *DB) MoveToDLQ(ctx context.Context, job *domain.Job, lastError string) (*domain.DeadLetterJob, error) {
 	tx, err := db.pool.Begin(ctx)
 	if err != nil {
@@ -144,10 +139,6 @@ func (db *DB) DeleteDLQJob(ctx context.Context, dlqID string) error {
 	}
 	return nil
 }
-
-// -----------------------------------------------------------------------
-// DLQ Read Operations
-// -----------------------------------------------------------------------
 
 // GetDLQByID fetches a single DLQ entry.
 func (db *DB) GetDLQByID(ctx context.Context, dlqID string) (*domain.DeadLetterJob, error) {
@@ -289,10 +280,6 @@ func (db *DB) BulkReplayDLQ(ctx context.Context, queue string) (int, error) {
 	}
 	return replayed, nil
 }
-
-// -----------------------------------------------------------------------
-// Scan helpers
-// -----------------------------------------------------------------------
 
 func scanDLQJob(row pgx.Row) (*domain.DeadLetterJob, error) {
 	j := &domain.DeadLetterJob{}

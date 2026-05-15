@@ -11,10 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// -----------------------------------------------------------------------
-// Write Operations
-// -----------------------------------------------------------------------
-
 // InsertJob persists a new job and returns it with DB-assigned fields populated.
 func (db *DB) InsertJob(ctx context.Context, req *domain.SubmitRequest) (*domain.Job, error) {
 	runAt := time.Now()
@@ -114,10 +110,6 @@ func (db *DB) RecordAttempt(ctx context.Context, a *domain.JobAttempt) error {
 	)
 	return err
 }
-
-// -----------------------------------------------------------------------
-// Read Operations
-// -----------------------------------------------------------------------
 
 // GetByID fetches a single job by its primary key.
 func (db *DB) GetByID(ctx context.Context, id string) (*domain.Job, error) {
@@ -240,10 +232,6 @@ func (db *DB) GetAttempts(ctx context.Context, jobID string) ([]*domain.JobAttem
 	return attempts, nil
 }
 
-// -----------------------------------------------------------------------
-// Dequeue — the heart of the worker
-// -----------------------------------------------------------------------
-
 // Dequeue atomically claims the next available job from the given queue.
 //
 // How it works:
@@ -365,10 +353,6 @@ func (db *DB) ListPendingForSync(ctx context.Context, queue string, limit int) (
 	}
 	return jobs, nil
 }
-
-// -----------------------------------------------------------------------
-// Scan helpers — keep scanning logic in one place
-// -----------------------------------------------------------------------
 
 func scanJob(row pgx.Row) (*domain.Job, error) {
 	j := &domain.Job{}

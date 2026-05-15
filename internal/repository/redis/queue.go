@@ -23,10 +23,6 @@ func inflightKey(name string) string {
 	return "inflight:" + name
 }
 
-// -----------------------------------------------------------------------
-// Priority score
-// -----------------------------------------------------------------------
-
 // Score encodes priority + time into a single float64 for the sorted set.
 //
 // Formula: priority * 1e12 + unix_nano
@@ -38,10 +34,6 @@ func inflightKey(name string) string {
 func Score(priority int, runAt time.Time) float64 {
 	return float64(priority)*1e12 + float64(runAt.UnixNano())
 }
-
-// -----------------------------------------------------------------------
-// Enqueue — called by API on job submit
-// -----------------------------------------------------------------------
 
 // Enqueue adds a job to the active queue with priority+time scoring.
 // If runAt is in the future, it goes to the scheduled set instead.
@@ -61,10 +53,6 @@ func (c *Client) Enqueue(ctx context.Context, queue, jobID string, priority int,
 	}).Err()
 }
 
-// -----------------------------------------------------------------------
-// Dequeue — called by worker
-// -----------------------------------------------------------------------
-
 // Dequeue atomically pops the highest-priority job from the queue.
 // Returns ("", nil) when the queue is empty — not an error.
 func (c *Client) Dequeue(ctx context.Context, queue string) (jobID string, err error) {
@@ -79,10 +67,6 @@ func (c *Client) Dequeue(ctx context.Context, queue string) (jobID string, err e
 
 	return res[0].Member.(string), nil
 }
-
-// -----------------------------------------------------------------------
-// In-flight tracking — crash safety at the Redis level
-// -----------------------------------------------------------------------
 
 // MarkInflight records a claimed job with a visibility deadline.
 // If the worker doesn't call RemoveInflight before the deadline,
@@ -133,10 +117,6 @@ func (c *Client) ReclaimExpiredInflight(ctx context.Context, queue string, prior
 	return len(expired), nil
 }
 
-// -----------------------------------------------------------------------
-// Scheduled job promotion — called by scheduler
-// -----------------------------------------------------------------------
-
 // PromoteScheduled moves jobs from the scheduled set into the active queue
 // when their run_at time has arrived. Called every second by the scheduler.
 // Returns the number of jobs promoted.
@@ -186,10 +166,6 @@ func (c *Client) EnqueueIfAbsent(ctx context.Context, queue, jobID string, prior
 		Member: jobID,
 	}).Err()
 }
-
-// -----------------------------------------------------------------------
-// Queue depth — used by metrics + health checks
-// -----------------------------------------------------------------------
 
 func (c *Client) QueueDepth(ctx context.Context, queue string) (int64, error) {
 	return c.rdb.ZCard(ctx, queueKey(queue)).Result()

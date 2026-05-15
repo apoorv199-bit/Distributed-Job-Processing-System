@@ -26,10 +26,7 @@ func NewJobHandler(svc *service.JobService, log *slog.Logger) *JobHandler {
 	}
 }
 
-// -----------------------------------------------------------------------
 // POST /api/v1/jobs
-// -----------------------------------------------------------------------
-
 func (h *JobHandler) Submit(w http.ResponseWriter, r *http.Request) {
 	var req domain.SubmitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -51,10 +48,7 @@ func (h *JobHandler) Submit(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusCreated, job)
 }
 
-// -----------------------------------------------------------------------
 // GET /api/v1/jobs/{id}
-// -----------------------------------------------------------------------
-
 func (h *JobHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
@@ -75,10 +69,7 @@ func (h *JobHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, job)
 }
 
-// -----------------------------------------------------------------------
 // GET /api/v1/jobs?queue=X&status=Y&page=1&limit=50
-// -----------------------------------------------------------------------
-
 func (h *JobHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -102,10 +93,7 @@ func (h *JobHandler) List(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
-// -----------------------------------------------------------------------
 // GET /api/v1/jobs/{id}/attempts
-// -----------------------------------------------------------------------
-
 func (h *JobHandler) GetAttempts(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -125,10 +113,7 @@ func (h *JobHandler) GetAttempts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// -----------------------------------------------------------------------
 // GET /api/v1/queues/{name}/stats
-// -----------------------------------------------------------------------
-
 func (h *JobHandler) QueueStats(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
@@ -144,10 +129,7 @@ func (h *JobHandler) QueueStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// -----------------------------------------------------------------------
 // Helpers
-// -----------------------------------------------------------------------
-
 func respondJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

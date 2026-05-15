@@ -59,12 +59,6 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to decode config: %w", err)
 	}
 
-	// Viper does not always decode comma-separated env values into []string,
-	// so preserve explicit WORKER_QUEUES env support.
-	if queues := v.GetString("WORKER_QUEUES"); queues != "" {
-		cfg.WorkerQueues = splitAndTrim(queues)
-	}
-
 	if cfg.WorkerID == "" {
 		cfg.WorkerID = hostname()
 	}
