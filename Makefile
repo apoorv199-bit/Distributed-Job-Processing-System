@@ -12,6 +12,7 @@ CMD_PATH    := ./cmd/api
 # ── Docker ───────────────────────────────────────────────────────────────────
 COMPOSE     := docker compose
 APP_NAME    := distributed-job-processor
+AUTH_HEADERS := -H "X-Client-ID: service-a" -H "X-API-Key: key-a"
 
 .PHONY: all build run clean \
         up down restart logs \
@@ -57,12 +58,8 @@ up:
 	@echo "✓ All services started"
 	@echo ""
 	@echo "  API          → http://localhost:8085"
-	@echo "  Prometheus   → http://localhost:9090"
-	@echo "  Grafana      → http://localhost:3000  (admin/admin)"
-	@echo "  Dashboard    → http://localhost:3000/d/job-processor-v1"
 	@echo ""
 	@echo "  Run 'make smoke' to send test jobs"
-	@echo "  Run 'make grafana-open' to open the dashboard"
 
 down:
 	@echo "→ Stopping all services..."
@@ -141,31 +138,32 @@ smoke:
 
 	@echo "\n── Submit noop job ──"
 	@curl -s -X POST http://localhost:8085/api/v1/jobs \
+	  $(AUTH_HEADERS) \
 	  -H "Content-Type: application/json" \
 	  -d '{"job_type":"noop","queue":"default","payload":{}}' | jq .
 
 	@echo "\n── Submit send_email job ──"
 	@curl -s -X POST http://localhost:8085/api/v1/jobs \
+	  $(AUTH_HEADERS) \
 	  -H "Content-Type: application/json" \
 	  -d '{"job_type":"send_email","queue":"default","payload":{"to":"test@example.com","template":"welcome"}}' | jq .
 
 	@echo "\n── Submit fail_always job (will retry then DLQ) ──"
 	@curl -s -X POST http://localhost:8085/api/v1/jobs \
+	  $(AUTH_HEADERS) \
 	  -H "Content-Type: application/json" \
 	  -d '{"job_type":"fail_always","queue":"default","payload":{},"max_attempts":1}' | jq .
 
 	@echo "\n── List jobs ──"
-	@curl -s "http://localhost:8085/api/v1/jobs?limit=5" | jq .
+	@curl -s $(AUTH_HEADERS) "http://localhost:8085/api/v1/jobs?limit=5" | jq .
 
 	@echo "\n── Queue stats (default) ──"
-	@curl -s http://localhost:8085/api/v1/queues/default/stats | jq .
+	@curl -s $(AUTH_HEADERS) http://localhost:8085/api/v1/queues/default/stats | jq .
 
 	@echo "\n── DLQ (wait ~5s for fail_always to exhaust) ──"
 	@sleep 5
-	@curl -s "http://localhost:8085/api/v1/dlq?queue=default" | jq .
+	@curl -s $(AUTH_HEADERS) "http://localhost:8085/api/v1/dlq?queue=default" | jq .
 
-	@echo "\n── Prometheus metrics (job counters) ──"
-	@curl -s http://localhost:8085/metrics | grep -E "^jobs_" || true
 
 smoke-phase4:
 	@echo ""
@@ -175,23 +173,26 @@ smoke-phase4:
 
 	@echo "\n── Submit high-priority job (critical queue, priority=1) ──"
 	@curl -s -X POST http://localhost:8085/api/v1/jobs \
+	  $(AUTH_HEADERS) \
 	  -H "Content-Type: application/json" \
 	  -d '{"job_type":"noop","queue":"critical","priority":1,"payload":{}}' | jq .
 
 	@echo "\n── Submit low-priority job (batch queue, priority=9) ──"
 	@curl -s -X POST http://localhost:8085/api/v1/jobs \
+	  $(AUTH_HEADERS) \
 	  -H "Content-Type: application/json" \
 	  -d '{"job_type":"noop","queue":"batch","priority":9,"payload":{}}' | jq .
 
 	@echo "\n── Submit scheduled job (15s from now) ──"
 	@curl -s -X POST http://localhost:8085/api/v1/jobs \
+	  $(AUTH_HEADERS) \
 	  -H "Content-Type: application/json" \
 	  -d '{"job_type":"noop","queue":"default","priority":5,"payload":{},"run_at":"$(shell date -u -v+15S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+15 seconds' +%Y-%m-%dT%H:%M:%SZ)"}' | jq .
 
 	@echo "\n── Queue stats (all queues) ──"
 	@for q in critical default batch; do \
 		echo "  $$q:"; \
-		curl -s http://localhost:8085/api/v1/queues/$$q/stats | jq .; \
+		curl -s $(AUTH_HEADERS) http://localhost:8085/api/v1/queues/$$q/stats | jq .; \
 	done
 
 	@echo "\n── Redis queue depth (via metrics) ──"
@@ -199,29 +200,29 @@ smoke-phase4:
 
 	@echo "\n── Waiting 20s for scheduled job to promote and run... ──"
 	@sleep 20
-	@curl -s "http://localhost:8085/api/v1/jobs?queue=default&status=completed&limit=5" | jq .
+	@curl -s $(AUTH_HEADERS) "http://localhost:8085/api/v1/jobs?queue=default&status=completed&limit=5" | jq .
 
 # ============================================================================
 # DLQ helpers
 # ============================================================================
 
 dlq-list:
-	@curl -s "http://localhost:8085/api/v1/dlq?queue=$(QUEUE)&limit=20" | jq .
+	@curl -s $(AUTH_HEADERS) "http://localhost:8085/api/v1/dlq?queue=$(QUEUE)&limit=20" | jq .
 
 dlq-stats:
-	@curl -s "http://localhost:8085/api/v1/dlq/stats?queue=$(QUEUE)" | jq .
+	@curl -s $(AUTH_HEADERS) "http://localhost:8085/api/v1/dlq/stats?queue=$(QUEUE)" | jq .
 
 dlq-replay:
 	@echo "→ Replaying DLQ entry $(ID)..."
-	@curl -s -X POST http://localhost:8085/api/v1/dlq/$(ID)/replay | jq .
+	@curl -s $(AUTH_HEADERS) -X POST http://localhost:8085/api/v1/dlq/$(ID)/replay | jq .
 
 dlq-bulk-replay:
 	@echo "→ Bulk replaying queue $(QUEUE)..."
-	@curl -s -X POST "http://localhost:8085/api/v1/dlq/bulk-replay?queue=$(QUEUE)" | jq .
+	@curl -s $(AUTH_HEADERS) -X POST "http://localhost:8085/api/v1/dlq/bulk-replay?queue=$(QUEUE)" | jq .
 
 dlq-purge:
 	@echo "→ Purging DLQ entries older than $(DAYS) days..."
-	@curl -s -X POST http://localhost:8085/api/v1/dlq/purge \
+	@curl -s $(AUTH_HEADERS) -X POST http://localhost:8085/api/v1/dlq/purge \
 	  -H "Content-Type: application/json" \
 	  -d '{"older_than_days":$(DAYS),"queue":"$(QUEUE)"}' | jq .
 
@@ -293,22 +294,6 @@ redis-flush:
 	$(COMPOSE) -f $(ROOT)docker-compose.yml exec redis redis-cli FLUSHALL
 	@echo "✓ Redis flushed"
 
-# ============================================================================
-# Grafana
-# ============================================================================
-
-grafana-open:
-	@echo "→ Opening Grafana (admin/admin)..."
-	@open http://localhost:3000/d/job-processor-v1 2>/dev/null || \
-	 xdg-open http://localhost:3000/d/job-processor-v1 2>/dev/null || \
-	 echo "  Open http://localhost:3000/d/job-processor-v1 in your browser"
-
-grafana-logs:
-	$(COMPOSE) -f $(ROOT)docker-compose.yml logs -f grafana
-
-grafana-restart:
-	$(COMPOSE) -f $(ROOT)docker-compose.yml restart grafana
-
 
 # ============================================================================
 # Load test (requires k6)
@@ -333,7 +318,7 @@ help:
 	@echo "  make clean          Remove build artifacts"
 	@echo ""
 	@echo "Docker"
-	@echo "  make up             Start all services (Postgres, Redis, app, Prometheus, Grafana)"
+	@echo "  make up             Start core services (Postgres, Redis, app)"
 	@echo "  make down           Stop all services"
 	@echo "  make down-v         Stop all services and delete volumes"
 	@echo "  make restart        Restart app container"

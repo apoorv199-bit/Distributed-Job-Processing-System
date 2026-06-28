@@ -26,15 +26,15 @@ func (db *DB) MoveToDLQ(ctx context.Context, job *domain.Job, lastError string) 
 	// 1. Insert DLQ record
 	const insertDLQ = `
 		INSERT INTO dead_letter_jobs
-		    (job_id, job_type, queue, payload, last_error, attempt_count, max_attempts, job_created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, job_id, job_type, queue, payload, last_error,
+		    (job_id, job_type, queue, payload, last_error, attempt_count, max_attempts, job_created_at, client_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING id, client_id, job_id, job_type, queue, payload, last_error,
 		          attempt_count, max_attempts, job_created_at, died_at,
 		          replayed_at, replayed_job_id`
 
 	row := tx.QueryRow(ctx, insertDLQ,
 		job.ID, job.JobType, job.Queue, job.Payload,
-		lastError, job.AttemptCount, job.MaxAttempts, job.CreatedAt,
+		lastError, job.AttemptCount, job.MaxAttempts, job.CreatedAt, job.ClientID,
 	)
 
 	dlqJob, err := scanDLQJob(row)
@@ -67,7 +67,7 @@ func (db *DB) MoveToDLQ(ctx context.Context, job *domain.Job, lastError string) 
 //
 // Returns the new job so the caller can return its ID to the API client.
 // Returns ErrAlreadyReplayed if the entry has been replayed before.
-func (db *DB) ReplayDLQJob(ctx context.Context, dlqID string) (*domain.Job, error) {
+func (db *DB) ReplayDLQJob(ctx context.Context, clientID, dlqID string) (*domain.Job, error) {
 	tx, err := db.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -75,15 +75,27 @@ func (db *DB) ReplayDLQJob(ctx context.Context, dlqID string) (*domain.Job, erro
 	defer tx.Rollback(ctx)
 
 	// 1. Fetch and lock the DLQ entry
-	const fetchDLQ = `
-		SELECT id, job_id, job_type, queue, payload,
-		       last_error, attempt_count, max_attempts,
-		       job_created_at, died_at, replayed_at, replayed_job_id
-		FROM dead_letter_jobs
-		WHERE id = $1
-		FOR UPDATE`
+	var row pgx.Row
+	if clientID == "admin" {
+		const fetchDLQAdmin = `
+			SELECT id, client_id, job_id, job_type, queue, payload,
+			       last_error, attempt_count, max_attempts,
+			       job_created_at, died_at, replayed_at, replayed_job_id
+			FROM dead_letter_jobs
+			WHERE id = $1
+			FOR UPDATE`
+		row = tx.QueryRow(ctx, fetchDLQAdmin, dlqID)
+	} else {
+		const fetchDLQ = `
+			SELECT id, client_id, job_id, job_type, queue, payload,
+			       last_error, attempt_count, max_attempts,
+			       job_created_at, died_at, replayed_at, replayed_job_id
+			FROM dead_letter_jobs
+			WHERE id = $1 AND client_id = $2
+			FOR UPDATE`
+		row = tx.QueryRow(ctx, fetchDLQ, dlqID, clientID)
+	}
 
-	row := tx.QueryRow(ctx, fetchDLQ, dlqID)
 	dlqJob, err := scanDLQJob(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrDLQEntryNotFound
@@ -95,16 +107,16 @@ func (db *DB) ReplayDLQJob(ctx context.Context, dlqID string) (*domain.Job, erro
 		return nil, domain.ErrAlreadyReplayed
 	}
 
-	// 2. Insert a new job — reset attempt_count, preserve original payload + config
+	// 2. Insert a new job — reset attempt_count, preserve original payload + config, and retain original owner ClientID
 	const insertJob = `
-		INSERT INTO jobs (job_type, queue, payload, priority, max_attempts, run_at)
-		VALUES ($1, $2, $3, 5, $4, NOW())
-		RETURNING id, job_type, queue, payload, status, priority,
+		INSERT INTO jobs (job_type, queue, payload, priority, max_attempts, run_at, client_id)
+		VALUES ($1, $2, $3, 5, $4, NOW(), $5)
+		RETURNING id, client_id, job_type, queue, payload, status, priority,
 		          max_attempts, attempt_count, run_at,
 		          started_at, completed_at, failed_at,
-		          worker_id, last_error, created_at, updated_at`
+		          worker_id, last_error, idempotency_key, COALESCE(request_hash, ''), created_at, updated_at`
 
-	jobRow := tx.QueryRow(ctx, insertJob, dlqJob.JobType, dlqJob.Queue, dlqJob.Payload, dlqJob.MaxAttempts)
+	jobRow := tx.QueryRow(ctx, insertJob, dlqJob.JobType, dlqJob.Queue, dlqJob.Payload, dlqJob.MaxAttempts, dlqJob.ClientID)
 	newJob, err := scanJob(jobRow)
 	if err != nil {
 		return nil, fmt.Errorf("insert replayed job: %w", err)
@@ -127,10 +139,18 @@ func (db *DB) ReplayDLQJob(ctx context.Context, dlqID string) (*domain.Job, erro
 	return newJob, nil
 }
 
-// DeleteDLQJob permanently removes a DLQ entry (and does NOT affect the original job).
-func (db *DB) DeleteDLQJob(ctx context.Context, dlqID string) error {
-	const q = `DELETE FROM dead_letter_jobs WHERE id = $1`
-	result, err := db.pool.Exec(ctx, q, dlqID)
+// DeleteDLQJob permanently removes a DLQ entry (isolated by clientID unless admin).
+func (db *DB) DeleteDLQJob(ctx context.Context, clientID, dlqID string) error {
+	var q string
+	var args []any
+	if clientID == "admin" {
+		q = `DELETE FROM dead_letter_jobs WHERE id = $1`
+		args = []any{dlqID}
+	} else {
+		q = `DELETE FROM dead_letter_jobs WHERE id = $1 AND client_id = $2`
+		args = []any{dlqID, clientID}
+	}
+	result, err := db.pool.Exec(ctx, q, args...)
 	if err != nil {
 		return err
 	}
@@ -140,16 +160,28 @@ func (db *DB) DeleteDLQJob(ctx context.Context, dlqID string) error {
 	return nil
 }
 
-// GetDLQByID fetches a single DLQ entry.
-func (db *DB) GetDLQByID(ctx context.Context, dlqID string) (*domain.DeadLetterJob, error) {
-	const q = `
-		SELECT id, job_id, job_type, queue, payload, last_error,
-		       attempt_count, max_attempts, job_created_at, died_at,
-		       replayed_at, replayed_job_id
-		FROM dead_letter_jobs
-		WHERE id = $1`
+// GetDLQByID fetches a single DLQ entry (isolated by clientID unless admin).
+func (db *DB) GetDLQByID(ctx context.Context, clientID, dlqID string) (*domain.DeadLetterJob, error) {
+	var q string
+	var row pgx.Row
+	if clientID == "admin" {
+		q = `
+			SELECT id, client_id, job_id, job_type, queue, payload, last_error,
+			       attempt_count, max_attempts, job_created_at, died_at,
+			       replayed_at, replayed_job_id
+			FROM dead_letter_jobs
+			WHERE id = $1`
+		row = db.pool.QueryRow(ctx, q, dlqID)
+	} else {
+		q = `
+			SELECT id, client_id, job_id, job_type, queue, payload, last_error,
+			       attempt_count, max_attempts, job_created_at, died_at,
+			       replayed_at, replayed_job_id
+			FROM dead_letter_jobs
+			WHERE id = $1 AND client_id = $2`
+		row = db.pool.QueryRow(ctx, q, dlqID, clientID)
+	}
 
-	row := db.pool.QueryRow(ctx, q, dlqID)
 	dlqJob, err := scanDLQJob(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrDLQEntryNotFound
@@ -157,8 +189,8 @@ func (db *DB) GetDLQByID(ctx context.Context, dlqID string) (*domain.DeadLetterJ
 	return dlqJob, err
 }
 
-// ListDLQ returns paginated DLQ entries with optional queue and replay filters.
-func (db *DB) ListDLQ(ctx context.Context, f domain.DLQListFilter) (*domain.DLQListResult, error) {
+// ListDLQ returns paginated DLQ entries (filtered by clientID unless admin).
+func (db *DB) ListDLQ(ctx context.Context, clientID string, f domain.DLQListFilter) (*domain.DLQListResult, error) {
 	if f.Limit == 0 {
 		f.Limit = 50
 	}
@@ -167,9 +199,19 @@ func (db *DB) ListDLQ(ctx context.Context, f domain.DLQListFilter) (*domain.DLQL
 	}
 	offset := (f.Page - 1) * f.Limit
 
-	where := []string{"1=1"}
-	args := []any{}
-	idx := 1
+	var where []string
+	var args []any
+	var idx int
+
+	if clientID == "admin" {
+		where = []string{"1=1"}
+		args = []any{}
+		idx = 1
+	} else {
+		where = []string{"client_id = $1"}
+		args = []any{clientID}
+		idx = 2
+	}
 
 	if f.Queue != "" {
 		where = append(where, fmt.Sprintf("queue = $%d", idx))
@@ -189,7 +231,7 @@ func (db *DB) ListDLQ(ctx context.Context, f domain.DLQListFilter) (*domain.DLQL
 	}
 
 	dataQ := fmt.Sprintf(`
-		SELECT id, job_id, job_type, queue, payload, last_error,
+		SELECT id, client_id, job_id, job_type, queue, payload, last_error,
 		       attempt_count, max_attempts, job_created_at, died_at,
 		       replayed_at, replayed_job_id
 		FROM dead_letter_jobs
@@ -223,18 +265,32 @@ func (db *DB) ListDLQ(ctx context.Context, f domain.DLQListFilter) (*domain.DLQL
 	}, nil
 }
 
-// DLQStats returns aggregate counts for a queue's DLQ — useful for dashboards.
-func (db *DB) DLQStats(ctx context.Context, queue string) (map[string]int, error) {
-	const q = `
-		SELECT
-			COUNT(*)                                       AS total,
-			COUNT(*) FILTER (WHERE replayed_at IS NULL)    AS pending_replay,
-			COUNT(*) FILTER (WHERE replayed_at IS NOT NULL) AS replayed
-		FROM dead_letter_jobs
-		WHERE queue = $1`
+// DLQStats returns aggregate counts for a queue's DLQ (filtered by clientID unless admin).
+func (db *DB) DLQStats(ctx context.Context, clientID, queue string) (map[string]int, error) {
+	var q string
+	var row pgx.Row
+	if clientID == "admin" {
+		q = `
+			SELECT
+				COUNT(*)                                       AS total,
+				COUNT(*) FILTER (WHERE replayed_at IS NULL)    AS pending_replay,
+				COUNT(*) FILTER (WHERE replayed_at IS NOT NULL) AS replayed
+			FROM dead_letter_jobs
+			WHERE queue = $1`
+		row = db.pool.QueryRow(ctx, q, queue)
+	} else {
+		q = `
+			SELECT
+				COUNT(*)                                       AS total,
+				COUNT(*) FILTER (WHERE replayed_at IS NULL)    AS pending_replay,
+				COUNT(*) FILTER (WHERE replayed_at IS NOT NULL) AS replayed
+			FROM dead_letter_jobs
+			WHERE queue = $1 AND client_id = $2`
+		row = db.pool.QueryRow(ctx, q, queue, clientID)
+	}
 
 	var total, pendingReplay, replayed int
-	if err := db.pool.QueryRow(ctx, q, queue).Scan(&total, &pendingReplay, &replayed); err != nil {
+	if err := row.Scan(&total, &pendingReplay, &replayed); err != nil {
 		return nil, err
 	}
 
@@ -245,38 +301,45 @@ func (db *DB) DLQStats(ctx context.Context, queue string) (map[string]int, error
 	}, nil
 }
 
-// BulkReplayDLQ replays all unreplayed DLQ entries for a queue.
-// Returns the count of jobs successfully replayed.
-// Each replay is its own transaction — a failure on one doesn't roll back others.
-func (db *DB) BulkReplayDLQ(ctx context.Context, queue string) (int, error) {
-	// Fetch all unreplayed IDs first
-	const listQ = `
-		SELECT id FROM dead_letter_jobs
-		WHERE queue = $1 AND replayed_at IS NULL
-		ORDER BY died_at ASC`
-
-	rows, err := db.pool.Query(ctx, listQ, queue)
+// BulkReplayDLQ replays all unreplayed DLQ entries for a queue (filtered by clientID unless admin).
+func (db *DB) BulkReplayDLQ(ctx context.Context, clientID, queue string) ([]*domain.Job, error) {
+	var listQ string
+	var rows pgx.Rows
+	var err error
+	if clientID == "admin" {
+		listQ = `
+			SELECT id FROM dead_letter_jobs
+			WHERE queue = $1 AND replayed_at IS NULL
+			ORDER BY died_at ASC`
+		rows, err = db.pool.Query(ctx, listQ, queue)
+	} else {
+		listQ = `
+			SELECT id FROM dead_letter_jobs
+			WHERE queue = $1 AND replayed_at IS NULL AND client_id = $2
+			ORDER BY died_at ASC`
+		rows, err = db.pool.Query(ctx, listQ, queue, clientID)
+	}
 	if err != nil {
-		return 0, fmt.Errorf("list dlq for bulk replay: %w", err)
+		return nil, fmt.Errorf("list dlq for bulk replay: %w", err)
 	}
 	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return 0, err
+			return nil, err
 		}
 		ids = append(ids, id)
 	}
 	rows.Close()
 
-	replayed := 0
+	var replayed []*domain.Job
 	for _, id := range ids {
-		if _, err := db.ReplayDLQJob(ctx, id); err != nil {
-			// Log but continue — don't abort the bulk operation on one failure
+		job, err := db.ReplayDLQJob(ctx, clientID, id)
+		if err != nil {
 			continue
 		}
-		replayed++
+		replayed = append(replayed, job)
 	}
 	return replayed, nil
 }
@@ -284,7 +347,7 @@ func (db *DB) BulkReplayDLQ(ctx context.Context, queue string) (int, error) {
 func scanDLQJob(row pgx.Row) (*domain.DeadLetterJob, error) {
 	j := &domain.DeadLetterJob{}
 	err := row.Scan(
-		&j.ID, &j.JobID, &j.JobType, &j.Queue, &j.Payload,
+		&j.ID, &j.ClientID, &j.JobID, &j.JobType, &j.Queue, &j.Payload,
 		&j.LastError, &j.AttemptCount, &j.MaxAttempts,
 		&j.JobCreatedAt, &j.DiedAt, &j.ReplayedAt, &j.ReplayedJobID,
 	)
@@ -297,7 +360,7 @@ func scanDLQJob(row pgx.Row) (*domain.DeadLetterJob, error) {
 func scanDLQJobFromRows(rows pgx.Rows) (*domain.DeadLetterJob, error) {
 	j := &domain.DeadLetterJob{}
 	err := rows.Scan(
-		&j.ID, &j.JobID, &j.JobType, &j.Queue, &j.Payload,
+		&j.ID, &j.ClientID, &j.JobID, &j.JobType, &j.Queue, &j.Payload,
 		&j.LastError, &j.AttemptCount, &j.MaxAttempts,
 		&j.JobCreatedAt, &j.DiedAt, &j.ReplayedAt, &j.ReplayedJobID,
 	)
@@ -307,12 +370,19 @@ func scanDLQJobFromRows(rows pgx.Rows) (*domain.DeadLetterJob, error) {
 	return j, nil
 }
 
-// purgeOldDLQEntries removes DLQ entries older than the given duration.
-// Useful for periodic cleanup to prevent unbounded table growth.
-func (db *DB) PurgeDLQOlderThan(ctx context.Context, age time.Duration) (int64, error) {
-	const q = `DELETE FROM dead_letter_jobs WHERE died_at < $1`
+// PurgeDLQOlderThan removes DLQ entries for a client older than the given duration (cleans all if admin).
+func (db *DB) PurgeDLQOlderThan(ctx context.Context, clientID string, age time.Duration) (int64, error) {
+	var q string
+	var args []any
 	cutoff := time.Now().Add(-age)
-	result, err := db.pool.Exec(ctx, q, cutoff)
+	if clientID == "admin" {
+		q = `DELETE FROM dead_letter_jobs WHERE died_at < $1`
+		args = []any{cutoff}
+	} else {
+		q = `DELETE FROM dead_letter_jobs WHERE died_at < $1 AND client_id = $2`
+		args = []any{cutoff, clientID}
+	}
+	result, err := db.pool.Exec(ctx, q, args...)
 	if err != nil {
 		return 0, err
 	}

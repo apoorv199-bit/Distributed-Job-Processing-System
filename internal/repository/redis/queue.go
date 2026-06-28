@@ -25,14 +25,14 @@ func inflightKey(name string) string {
 
 // Score encodes priority + time into a single float64 for the sorted set.
 //
-// Formula: priority * 1e12 + unix_nano
+// Formula: priority * 1e10 + unix_seconds
 //
 // This means:
-//   - priority=1 (highest) gets score ~1e12, priority=10 gets ~10e12
-//   - Within the same priority, earlier run_at wins (lower unix_nano)
+//   - priority=1 (highest) gets score ~1e10, priority=10 gets ~10e10
+//   - Within the same priority, earlier run_at wins (lower unix_seconds)
 //   - ZPOPMIN always returns the job that should run next
 func Score(priority int, runAt time.Time) float64 {
-	return float64(priority)*1e12 + float64(runAt.UnixNano())
+	return float64(priority)*1e10 + float64(runAt.Unix())
 }
 
 // Enqueue adds a job to the active queue with priority+time scoring.
@@ -41,7 +41,7 @@ func (c *Client) Enqueue(ctx context.Context, queue, jobID string, priority int,
 	if runAt.After(time.Now()) {
 		// Future job → scheduled set, score = unix timestamp of run_at
 		return c.rdb.ZAdd(ctx, scheduledKey(queue), redis.Z{
-			Score:  float64(runAt.UnixNano()),
+			Score:  float64(runAt.Unix()),
 			Member: jobID,
 		}).Err()
 	}

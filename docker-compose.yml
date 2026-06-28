@@ -37,6 +37,7 @@ services:
       DATABASE_URL: postgres://app:secret@postgres:5432/jobprocessor?sslmode=disable
       REDIS_URL: redis:6379
       API_KEY: apoorvsahu123456
+      API_KEYS: "service-a:key-a,service-b:key-b"
       WORKER_ID: docker-worker-1
       WORKER_CONCURRENCY: 10
       RATE_LIMIT_DEFAULT: 100
@@ -53,41 +54,5 @@ services:
       redis:
         condition: service_healthy
 
-  prometheus:
-    image: prom/prometheus:latest
-    volumes:
-      - ./deployments/prometheus.yml:/etc/prometheus/prometheus.yml
-    ports:
-      - "9090:9090"
-    depends_on:
-      - app
-
-  grafana:
-    image: grafana/grafana:10.4.0
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-      # Disable the "change password" prompt on first login
-      GF_AUTH_DISABLE_LOGIN_FORM: "false"
-      GF_USERS_DEFAULT_THEME: dark
-    volumes:
-      # Provisioning — auto-loads datasource + dashboard on startup
-      - ./deployments/grafana/provisioning:/etc/grafana/provisioning
-      # Dashboard JSON files
-      - ./deployments/grafana/dashboards:/var/lib/grafana/dashboards
-      # Persist Grafana state (annotations, saved queries, etc.)
-      - grafana_data:/var/lib/grafana
-    depends_on:
-      - prometheus
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
 volumes:
   pgdata:
-  grafana_data:

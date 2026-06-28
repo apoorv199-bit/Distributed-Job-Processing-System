@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,30 +14,57 @@ import (
 )
 
 // InsertJob persists a new job and returns it with DB-assigned fields populated.
-func (db *DB) InsertJob(ctx context.Context, req *domain.SubmitRequest) (*domain.Job, error) {
+// If a job with the same idempotency key exists, it returns the existing job.
+// InsertJob persists a new job and returns it with DB-assigned fields populated.
+// If a job with the same idempotency key exists, it returns the existing job.
+func (db *DB) InsertJob(ctx context.Context, clientID string, req *domain.SubmitRequest) (*domain.Job, error) {
 	runAt := time.Now()
 	if req.RunAt != nil {
 		runAt = *req.RunAt
 	}
 
+	// Compute request hash for idempotency key verification
+	hasher := sha256.New()
+	hasher.Write([]byte(req.JobType))
+	hasher.Write([]byte(req.Queue))
+	hasher.Write(req.Payload)
+	requestHash := hex.EncodeToString(hasher.Sum(nil))
+
+	idempotencyKey := ""
+	if req.IdempotencyKey != nil {
+		idempotencyKey = *req.IdempotencyKey
+	}
+
 	const q = `
-		INSERT INTO jobs (job_type, queue, payload, priority, max_attempts, run_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, job_type, queue, payload, status, priority,
+		INSERT INTO jobs (job_type, queue, payload, priority, max_attempts, run_at, idempotency_key, client_id, request_hash)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9)
+		ON CONFLICT (client_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+		DO UPDATE SET updated_at = jobs.updated_at
+		RETURNING id, client_id, job_type, queue, payload, status, priority,
 		          max_attempts, attempt_count, run_at,
 		          started_at, completed_at, failed_at,
-		          worker_id, last_error, created_at, updated_at`
+		          worker_id, last_error, idempotency_key, COALESCE(request_hash, ''), created_at, updated_at`
 
-	row := db.pool.QueryRow(ctx, q, req.JobType, req.Queue, req.Payload, req.Priority, req.MaxAttempts, runAt)
+	row := db.pool.QueryRow(ctx, q, req.JobType, req.Queue, req.Payload, req.Priority, req.MaxAttempts, runAt, idempotencyKey, clientID, requestHash)
 
-	return scanJob(row)
+	job, err := scanJob(row)
+	if err != nil {
+		return nil, err
+	}
+
+	// If the job already exists (idempotency key conflict), check if the request hash matches
+	if job.IdempotencyKey != nil && *job.IdempotencyKey != "" {
+		if job.RequestHash != requestHash {
+			return nil, domain.ErrIdempotencyConflict
+		}
+	}
+
+	return job, nil
 }
 
 // MarkRunning atomically claims the job for a worker.
-// Returns ErrJobNotFound if the job is no longer in pending state
-// (e.g., another worker grabbed it — shouldn't happen with SKIP LOCKED,
-// but this is a safety net).
-func (db *DB) MarkRunning(ctx context.Context, jobID, workerID string) (*domain.Job, error) {
+// Returns ErrJobNotFound if the job is no longer in pending state (or running but not yet timed out).
+func (db *DB) MarkRunning(ctx context.Context, jobID, workerID string, visibilityTimeout time.Duration) (*domain.Job, error) {
 	const q = `
 		UPDATE jobs
 		SET status = 'running',
@@ -43,13 +72,14 @@ func (db *DB) MarkRunning(ctx context.Context, jobID, workerID string) (*domain.
 			worker_id = $2,
 			attempt_count = attempt_count + 1,
 			updated_at = Now()
-		WHERE id = $1 AND status = 'pending'
-		RETURNING id, job_type, queue, payload, status, priority,
+		WHERE id = $1 AND (status = 'pending' OR (status = 'running' AND started_at < $3))
+		RETURNING id, client_id, job_type, queue, payload, status, priority,
 		          max_attempts, attempt_count, run_at,
 		          started_at, completed_at, failed_at,
-		          worker_id, last_error, created_at, updated_at`
+		          worker_id, last_error, idempotency_key, COALESCE(request_hash, ''), created_at, updated_at`
 
-	row := db.pool.QueryRow(ctx, q, jobID, workerID)
+	cutoff := time.Now().Add(-visibilityTimeout)
+	row := db.pool.QueryRow(ctx, q, jobID, workerID, cutoff)
 	job, err := scanJob(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrJobNotFound
@@ -111,16 +141,28 @@ func (db *DB) RecordAttempt(ctx context.Context, a *domain.JobAttempt) error {
 	return err
 }
 
-// GetByID fetches a single job by its primary key.
-func (db *DB) GetByID(ctx context.Context, id string) (*domain.Job, error) {
-	const q = `
-		SELECT id, job_type, queue, payload, status, priority,
-		       max_attempts, attempt_count, run_at,
-		       started_at, completed_at, failed_at,
-		       worker_id, last_error, created_at, updated_at
-		FROM jobs WHERE id = $1`
+// GetByID fetches a single job by its primary key. If clientID is not "admin", filters by clientID.
+func (db *DB) GetByID(ctx context.Context, clientID, id string) (*domain.Job, error) {
+	var q string
+	var row pgx.Row
+	if clientID == "admin" {
+		q = `
+			SELECT id, client_id, job_type, queue, payload, status, priority,
+			       max_attempts, attempt_count, run_at,
+			       started_at, completed_at, failed_at,
+			       worker_id, last_error, idempotency_key, COALESCE(request_hash, ''), created_at, updated_at
+			FROM jobs WHERE id = $1`
+		row = db.pool.QueryRow(ctx, q, id)
+	} else {
+		q = `
+			SELECT id, client_id, job_type, queue, payload, status, priority,
+			       max_attempts, attempt_count, run_at,
+			       started_at, completed_at, failed_at,
+			       worker_id, last_error, idempotency_key, COALESCE(request_hash, ''), created_at, updated_at
+			FROM jobs WHERE id = $1 AND client_id = $2`
+		row = db.pool.QueryRow(ctx, q, id, clientID)
+	}
 
-	row := db.pool.QueryRow(ctx, q, id)
 	job, err := scanJob(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrJobNotFound
@@ -128,8 +170,8 @@ func (db *DB) GetByID(ctx context.Context, id string) (*domain.Job, error) {
 	return job, err
 }
 
-// List returns a paginated, optionally filtered list of jobs.
-func (db *DB) List(ctx context.Context, f domain.ListFilter) (*domain.ListResult, error) {
+// List returns a paginated, optionally filtered list of jobs for a specific client.
+func (db *DB) List(ctx context.Context, clientID string, f domain.ListFilter) (*domain.ListResult, error) {
 	if f.Limit == 0 {
 		f.Limit = 50
 	}
@@ -141,9 +183,19 @@ func (db *DB) List(ctx context.Context, f domain.ListFilter) (*domain.ListResult
 	offset := (f.Page - 1) * f.Limit
 
 	// Build dynamic WHERE clause
-	where := []string{"1=1"}
-	args := []any{}
-	idx := 1
+	var where []string
+	var args []any
+	var idx int
+
+	if clientID == "admin" {
+		where = []string{"1=1"}
+		args = []any{}
+		idx = 1
+	} else {
+		where = []string{"client_id = $1"}
+		args = []any{clientID}
+		idx = 2
+	}
 
 	if f.Queue != "" {
 		where = append(where, fmt.Sprintf("queue = $%d", idx))
@@ -167,10 +219,10 @@ func (db *DB) List(ctx context.Context, f domain.ListFilter) (*domain.ListResult
 
 	// Fetch page
 	dataQ := fmt.Sprintf(`
-		SELECT id, job_type, queue, payload, status, priority,
+		SELECT id, client_id, job_type, queue, payload, status, priority,
 		       max_attempts, attempt_count, run_at,
 		       started_at, completed_at, failed_at,
-		       worker_id, last_error, created_at, updated_at
+		       worker_id, last_error, idempotency_key, COALESCE(request_hash, ''), created_at, updated_at
 		FROM jobs
 		WHERE %s
 		ORDER BY priority ASC, created_at DESC
@@ -252,19 +304,19 @@ func (db *DB) Dequeue(ctx context.Context, queue, workerID string) (*domain.Job,
 		    attempt_count = attempt_count + 1,
 		    updated_at    = NOW()
 		WHERE id = (
-		    SELECT id
-		    FROM   jobs
-		    WHERE  queue  = $1
-		      AND  status = 'pending'
-		      AND  run_at <= NOW()
-		    ORDER BY priority ASC, run_at ASC
-		    FOR UPDATE SKIP LOCKED
-		    LIMIT 1
+			SELECT id
+			FROM   jobs
+			WHERE  queue  = $1
+			  AND  status = 'pending'
+			  AND  run_at <= NOW()
+			ORDER BY priority ASC, run_at ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
 		)
-		RETURNING id, job_type, queue, payload, status, priority,
+		RETURNING id, client_id, job_type, queue, payload, status, priority,
 		          max_attempts, attempt_count, run_at,
 		          started_at, completed_at, failed_at,
-		          worker_id, last_error, created_at, updated_at`
+		          worker_id, last_error, idempotency_key, COALESCE(request_hash, ''), created_at, updated_at`
 
 	row := db.pool.QueryRow(ctx, q, queue, workerID)
 	job, err := scanJob(row)
@@ -326,10 +378,10 @@ func (db *DB) QueueStats(ctx context.Context, queue string) (map[string]int, err
 // Limit is applied so we never load unbounded rows.
 func (db *DB) ListPendingForSync(ctx context.Context, queue string, limit int) ([]*domain.Job, error) {
 	const q = `
-		SELECT id, job_type, queue, payload, status, priority,
+		SELECT id, client_id, job_type, queue, payload, status, priority,
 		       max_attempts, attempt_count, run_at,
 		       started_at, completed_at, failed_at,
-		       worker_id, last_error, created_at, updated_at
+		       worker_id, last_error, idempotency_key, COALESCE(request_hash, ''), created_at, updated_at
 		FROM jobs
 		WHERE queue  = $1
 		  AND status = 'pending'
@@ -357,10 +409,10 @@ func (db *DB) ListPendingForSync(ctx context.Context, queue string, limit int) (
 func scanJob(row pgx.Row) (*domain.Job, error) {
 	j := &domain.Job{}
 	err := row.Scan(
-		&j.ID, &j.JobType, &j.Queue, &j.Payload, &j.Status, &j.Priority,
+		&j.ID, &j.ClientID, &j.JobType, &j.Queue, &j.Payload, &j.Status, &j.Priority,
 		&j.MaxAttempts, &j.AttemptCount, &j.RunAt,
 		&j.StartedAt, &j.CompletedAt, &j.FailedAt,
-		&j.WorkerID, &j.LastError, &j.CreatedAt, &j.UpdatedAt,
+		&j.WorkerID, &j.LastError, &j.IdempotencyKey, &j.RequestHash, &j.CreatedAt, &j.UpdatedAt,
 	)
 
 	if err != nil {
@@ -373,10 +425,10 @@ func scanJob(row pgx.Row) (*domain.Job, error) {
 func scanJobFromRows(rows pgx.Rows) (*domain.Job, error) {
 	j := &domain.Job{}
 	err := rows.Scan(
-		&j.ID, &j.JobType, &j.Queue, &j.Payload, &j.Status, &j.Priority,
+		&j.ID, &j.ClientID, &j.JobType, &j.Queue, &j.Payload, &j.Status, &j.Priority,
 		&j.MaxAttempts, &j.AttemptCount, &j.RunAt,
 		&j.StartedAt, &j.CompletedAt, &j.FailedAt,
-		&j.WorkerID, &j.LastError, &j.CreatedAt, &j.UpdatedAt,
+		&j.WorkerID, &j.LastError, &j.IdempotencyKey, &j.RequestHash, &j.CreatedAt, &j.UpdatedAt,
 	)
 
 	if err != nil {

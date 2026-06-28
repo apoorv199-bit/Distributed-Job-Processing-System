@@ -15,24 +15,26 @@ const (
 	StatusDead      Status = "dead"
 )
 
-// Job is the core domain entity. All fields map 1:1 to the jobs table.
 type Job struct {
-	ID           string          `json:"id"`
-	JobType      string          `json:"job_type"`
-	Queue        string          `json:"queue"`
-	Payload      json.RawMessage `json:"payload"`
-	Status       Status          `json:"status"`
-	Priority     int             `json:"priority"`
-	MaxAttempts  int             `json:"max_attempts"`
-	AttemptCount int             `json:"attempt_count"`
-	RunAt        time.Time       `json:"run_at"`
-	StartedAt    *time.Time      `json:"started_at,omitempty"`
-	CompletedAt  *time.Time      `json:"completed_at,omitempty"`
-	FailedAt     *time.Time      `json:"failed_at,omitempty"`
-	WorkerID     *string         `json:"worker_id,omitempty"`
-	LastError    *string         `json:"last_error,omitempty"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
+	ID             string          `json:"id"`
+	ClientID       string          `json:"client_id"`
+	JobType        string          `json:"job_type"`
+	Queue          string          `json:"queue"`
+	Payload        json.RawMessage `json:"payload"`
+	Status         Status          `json:"status"`
+	Priority       int             `json:"priority"`
+	MaxAttempts    int             `json:"max_attempts"`
+	AttemptCount   int             `json:"attempt_count"`
+	RunAt          time.Time       `json:"run_at"`
+	StartedAt      *time.Time      `json:"started_at,omitempty"`
+	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+	FailedAt       *time.Time      `json:"failed_at,omitempty"`
+	WorkerID       *string         `json:"worker_id,omitempty"`
+	LastError      *string         `json:"last_error,omitempty"`
+	IdempotencyKey *string         `json:"idempotency_key,omitempty"`
+	RequestHash    string          `json:"request_hash"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
 // JobAttempt records a single execution attempt.
@@ -49,12 +51,13 @@ type JobAttempt struct {
 
 // SubmitRequest is the parsed input from the API layer.
 type SubmitRequest struct {
-	JobType     string          `json:"job_type"`
-	Queue       string          `json:"queue"`
-	Payload     json.RawMessage `json:"payload"`
-	Priority    int             `json:"priority"`
-	MaxAttempts int             `json:"max_attempts"`
-	RunAt       *time.Time      `json:"run_at,omitempty"`
+	JobType        string          `json:"job_type"`
+	Queue          string          `json:"queue"`
+	Payload        json.RawMessage `json:"payload"`
+	Priority       int             `json:"priority"`
+	MaxAttempts    int             `json:"max_attempts"`
+	RunAt          *time.Time      `json:"run_at,omitempty"`
+	IdempotencyKey *string         `json:"idempotency_key,omitempty"`
 }
 
 // ListFilter specifies filters for listing jobs via the API.
@@ -76,6 +79,7 @@ type ListResult struct {
 // DeadLetterJob is a permanently failed job stored for inspection and replay.
 type DeadLetterJob struct {
 	ID            string          `json:"id"`
+	ClientID      string          `json:"client_id"`
 	JobID         string          `json:"job_id"`
 	JobType       string          `json:"job_type"`
 	Queue         string          `json:"queue"`

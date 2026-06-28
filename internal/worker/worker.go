@@ -9,7 +9,6 @@ import (
 
 	"github.com/apoorv/distributed-job-processor/config"
 	"github.com/apoorv/distributed-job-processor/internal/domain"
-	"github.com/apoorv/distributed-job-processor/internal/metrics"
 	"github.com/apoorv/distributed-job-processor/internal/ratelimiter"
 	"github.com/apoorv/distributed-job-processor/internal/repository/postgres"
 	redisrepo "github.com/apoorv/distributed-job-processor/internal/repository/redis"
@@ -116,6 +115,9 @@ func (w *Worker) Start(ctx context.Context) {
 func (w *Worker) pollLoop(ctx context.Context, slot int) {
 	w.log.Debug("poll_loop.started", "slot", slot)
 
+	backoff := 50 * time.Millisecond
+	maxBackoff := 2 * time.Second
+
 	for {
 		// Exit immediately when context is cancelled.
 		select {
@@ -131,10 +133,17 @@ func (w *Worker) pollLoop(ctx context.Context, slot int) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
 			}
 			continue
 		}
+
+		// Reset backoff immediately upon finding a job
+		backoff = 50 * time.Millisecond
 
 		// Acquire semaphore slot — blocks if we're at max concurrency.
 		select {
@@ -143,17 +152,12 @@ func (w *Worker) pollLoop(ctx context.Context, slot int) {
 			return
 		}
 
-		// Track how many slots are in use
-		metrics.WorkerConcurrencyUsed.WithLabelValues(w.id).Inc()
-
 		// Run the job in a new goroutine so this poll loop can keep fetching.
 		w.wg.Add(1)
 		go func(j *domain.Job) {
 			defer w.wg.Done()
 			defer func() {
 				<-w.semaphore
-				// Release: decrement in-use gauge
-				metrics.WorkerConcurrencyUsed.WithLabelValues(w.id).Dec()
 			}()
 			w.executeJob(context.Background(), j) // fresh ctx — don't cancel on shutdown
 		}(job)
@@ -200,8 +204,8 @@ func (w *Worker) dequeueFromRedis(ctx context.Context) *domain.Job {
 		}
 
 		// Atomically claim the job in Postgres
-		// MarkRunning: UPDATE jobs SET status='running' WHERE id=$1 AND status='pending'
-		job, err := w.db.MarkRunning(ctx, jobID, w.id)
+		// MarkRunning: UPDATE jobs SET status='running' WHERE id=$1 AND (status='pending' OR status='running' AND started_at < cutoff)
+		job, err := w.db.MarkRunning(ctx, jobID, w.id, w.visibilityTimeout)
 		if err != nil {
 			// Job may have been picked up by another worker (should not happen
 			// with Redis ZPOPMIN but defensive check is worth keeping)
@@ -331,8 +335,6 @@ func (w *Worker) executeJob(ctx context.Context, job *domain.Job) {
 		w.log.Error("job.unknown_type", "job_id", job.ID, "job_type", job.JobType, "error", err)
 
 		w.failJob(ctx, job, err, start)
-		// Count as a failed process so it shows up in metrics
-		metrics.JobsProcessed.WithLabelValues(job.JobType, job.Queue, "failed").Inc()
 		return
 	}
 
@@ -363,7 +365,6 @@ func (w *Worker) executeJob(ctx context.Context, job *domain.Job) {
 			)
 			// Fall back to just marking failed so it's not lost
 			w.failJob(ctx, job, err, start)
-			metrics.JobsProcessed.WithLabelValues(job.JobType, job.Queue, "failed").Inc()
 		} else {
 			w.log.Info("job.moved_to_dlq",
 				"job_id", job.ID,
@@ -371,11 +372,6 @@ func (w *Worker) executeJob(ctx context.Context, job *domain.Job) {
 				"queue", job.Queue,
 			)
 			w.recordAttempt(ctx, job, start, "failed", dlqErr)
-
-			// DLQ is a distinct outcome — track it separately
-			metrics.JobsProcessed.WithLabelValues(job.JobType, job.Queue, "dlq").Inc()
-			metrics.JobDuration.WithLabelValues(job.JobType, job.Queue).Observe(duration.Seconds())
-			metrics.DLQTotal.WithLabelValues(job.Queue).Inc()
 		}
 		return
 	}
@@ -407,9 +403,6 @@ func (w *Worker) executeJob(ctx context.Context, job *domain.Job) {
 
 	_ = w.redis.RemoveInflight(ctx, job.Queue, job.ID)
 	w.recordAttempt(ctx, job, start, "failed", err.Error())
-
-	// Count each retry so you can alert on retry storms
-	metrics.RetryTotal.WithLabelValues(job.JobType, job.Queue).Inc()
 }
 
 func (w *Worker) completeJob(ctx context.Context, job *domain.Job, duration time.Duration) {
@@ -423,10 +416,6 @@ func (w *Worker) completeJob(ctx context.Context, job *domain.Job, duration time
 	}
 
 	w.recordAttempt(ctx, job, time.Now().Add(-duration), "completed", "")
-
-	// Metrices
-	metrics.JobsProcessed.WithLabelValues(job.JobType, job.Queue, "completed").Inc()
-	metrics.JobDuration.WithLabelValues(job.JobType, job.Queue).Observe(duration.Seconds())
 
 	w.log.Info("job.completed",
 		"job_id", job.ID,
