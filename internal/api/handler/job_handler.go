@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
+	"github.com/apoorv/distributed-job-processor/internal/api/middleware"
 	"github.com/apoorv/distributed-job-processor/internal/domain"
 	"github.com/apoorv/distributed-job-processor/internal/service"
 	"github.com/go-chi/chi/v5"
@@ -34,8 +36,23 @@ func (h *JobHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := h.svc.Submit(r.Context(), &req)
+	if req.IdempotencyKey == nil || *req.IdempotencyKey == "" {
+		if val := r.Header.Get("X-Idempotency-Key"); val != "" {
+			req.IdempotencyKey = &val
+		}
+	}
+
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
+	}
+
+	job, err := h.svc.Submit(r.Context(), clientID, &req)
 	if err != nil {
+		if errors.Is(err, domain.ErrIdempotencyConflict) {
+			respondError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if errors.Is(err, domain.ErrMissingJobType) || errors.Is(err, domain.ErrInvalidPriority) {
 			respondError(w, http.StatusUnprocessableEntity, err.Error())
 			return
@@ -45,7 +62,16 @@ func (h *JobHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusCreated, job)
+	// Detect if it is a replay
+	isReplay := (req.IdempotencyKey != nil && *req.IdempotencyKey != "") &&
+		(job.Status != domain.StatusPending || time.Since(job.CreatedAt) > 500*time.Millisecond)
+
+	if isReplay {
+		w.Header().Set("Idempotent-Replay", "true")
+		respondJSON(w, http.StatusOK, job)
+	} else {
+		respondJSON(w, http.StatusCreated, job)
+	}
 }
 
 // GET /api/v1/jobs/{id}
@@ -56,7 +82,12 @@ func (h *JobHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := h.svc.GetByID(r.Context(), id)
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
+	}
+
+	job, err := h.svc.GetByID(r.Context(), clientID, id)
 	if err != nil {
 		if errors.Is(err, domain.ErrJobNotFound) {
 			respondError(w, http.StatusNotFound, "job not found")
@@ -84,7 +115,12 @@ func (h *JobHandler) List(w http.ResponseWriter, r *http.Request) {
 		filter.Limit = 200
 	}
 
-	result, err := h.svc.List(r.Context(), filter)
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
+	}
+
+	result, err := h.svc.List(r.Context(), clientID, filter)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -97,7 +133,12 @@ func (h *JobHandler) List(w http.ResponseWriter, r *http.Request) {
 func (h *JobHandler) GetAttempts(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	attempts, err := h.svc.GetAttempts(r.Context(), id)
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
+	}
+
+	attempts, err := h.svc.GetAttempts(r.Context(), clientID, id)
 	if err != nil {
 		if errors.Is(err, domain.ErrJobNotFound) {
 			respondError(w, http.StatusNotFound, "job not found")

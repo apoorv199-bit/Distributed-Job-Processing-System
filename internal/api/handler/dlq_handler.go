@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/apoorv/distributed-job-processor/internal/api/middleware"
 	"github.com/apoorv/distributed-job-processor/internal/domain"
 	"github.com/apoorv/distributed-job-processor/internal/service"
 	"github.com/go-chi/chi/v5"
@@ -23,7 +24,6 @@ func NewDLQHandler(svc *service.DLQService, log *slog.Logger) *DLQHandler {
 }
 
 // GET /api/v1/dlq?queue=X&unreplayed=true&page=1&limit=50
-// Lists dead-letter jobs. Supports filtering by queue and replay status.
 func (h *DLQHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -37,7 +37,12 @@ func (h *DLQHandler) List(w http.ResponseWriter, r *http.Request) {
 		filter.Limit = 200
 	}
 
-	result, err := h.svc.List(r.Context(), filter)
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
+	}
+
+	result, err := h.svc.List(r.Context(), clientID, filter)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to list DLQ")
 		return
@@ -46,11 +51,15 @@ func (h *DLQHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/v1/dlq/{id}
-// Fetch a single DLQ entry by its ID.
 func (h *DLQHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	entry, err := h.svc.GetByID(r.Context(), id)
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
+	}
+
+	entry, err := h.svc.GetByID(r.Context(), clientID, id)
 	if err != nil {
 		if errors.Is(err, domain.ErrDLQEntryNotFound) {
 			respondError(w, http.StatusNotFound, "DLQ entry not found")
@@ -63,11 +72,15 @@ func (h *DLQHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/v1/dlq/{id}/replay
-// Re-enqueues a dead job as a fresh pending job with attempt_count reset to 0. The DLQ entry is kept and marked with replayed_at for audit purposes.
 func (h *DLQHandler) Replay(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	newJob, err := h.svc.Replay(r.Context(), id)
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
+	}
+
+	newJob, err := h.svc.Replay(r.Context(), clientID, id)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrDLQEntryNotFound):
@@ -91,7 +104,6 @@ func (h *DLQHandler) Replay(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/v1/dlq/bulk-replay?queue=X
-// Replays ALL unreplayed entries for a given queue in one call.
 func (h *DLQHandler) BulkReplay(w http.ResponseWriter, r *http.Request) {
 	queue := r.URL.Query().Get("queue")
 	if queue == "" {
@@ -99,7 +111,12 @@ func (h *DLQHandler) BulkReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	count, err := h.svc.BulkReplay(r.Context(), queue)
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
+	}
+
+	count, err := h.svc.BulkReplay(r.Context(), clientID, queue)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "bulk replay failed")
 		return
@@ -113,11 +130,15 @@ func (h *DLQHandler) BulkReplay(w http.ResponseWriter, r *http.Request) {
 }
 
 // DELETE /api/v1/dlq/{id}
-// Permanently removes a DLQ entry. Use when you've decided to discard a dead job.
 func (h *DLQHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	if err := h.svc.Delete(r.Context(), id); err != nil {
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
+	}
+
+	if err := h.svc.Delete(r.Context(), clientID, id); err != nil {
 		if errors.Is(err, domain.ErrDLQEntryNotFound) {
 			respondError(w, http.StatusNotFound, "DLQ entry not found")
 			return
@@ -129,7 +150,6 @@ func (h *DLQHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/v1/dlq/stats?queue=X
-// Returns aggregate DLQ counts for a named queue.
 func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	queue := r.URL.Query().Get("queue")
 	if queue == "" {
@@ -137,7 +157,12 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats, err := h.svc.Stats(r.Context(), queue)
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
+	}
+
+	stats, err := h.svc.Stats(r.Context(), clientID, queue)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to get stats")
 		return
@@ -149,8 +174,7 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/v1/dlq/purge?queue=X&older_than_days=30
-// Deletes old DLQ entries. Meant for scheduled maintenance.
+// POST /api/v1/dlq/purge
 func (h *DLQHandler) Purge(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		OlderThanDays int    `json:"older_than_days"`
@@ -161,11 +185,16 @@ func (h *DLQHandler) Purge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.OlderThanDays <= 0 {
-		req.OlderThanDays = 30 // default: purge entries older than 30 days
+		req.OlderThanDays = 30
+	}
+
+	clientID, _ := r.Context().Value(middleware.ClientNameKey).(string)
+	if clientID == "" {
+		clientID = "default"
 	}
 
 	olderThan := time.Duration(req.OlderThanDays) * 24 * time.Hour
-	n, err := h.svc.Purge(r.Context(), olderThan)
+	n, err := h.svc.Purge(r.Context(), clientID, olderThan)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "purge failed")
 		return

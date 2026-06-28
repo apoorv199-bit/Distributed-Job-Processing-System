@@ -1,11 +1,13 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
 
@@ -16,13 +18,14 @@ type RateLimitConfig struct {
 }
 
 type Config struct {
-	Port              string   `mapstructure:"PORT"`
-	DatabaseURL       string   `mapstructure:"DATABASE_URL"`
-	RedisURL          string   `mapstructure:"REDIS_URL"`
-	APIKey            string   `mapstructure:"API_KEY"`
-	WorkerID          string   `mapstructure:"WORKER_ID"`
-	WorkerConcurrency int      `mapstructure:"WORKER_CONCURRENCY"`
-	WorkerQueues      []string `mapstructure:"WORKER_QUEUES"`
+	Port              string            `mapstructure:"PORT"`
+	DatabaseURL       string            `mapstructure:"DATABASE_URL"`
+	RedisURL          string            `mapstructure:"REDIS_URL"`
+	MasterKey         string            `mapstructure:"MASTER_KEY"`
+	APIKeys           map[string]string `mapstructure:"-"`
+	WorkerID          string            `mapstructure:"WORKER_ID"`
+	WorkerConcurrency int               `mapstructure:"WORKER_CONCURRENCY"`
+	WorkerQueues      []string          `mapstructure:"WORKER_QUEUES"`
 
 	// Visibility timeout: jobs stuck in 'running' longer than this get reset
 	VisibilityTimeoutMinutes     int             `mapstructure:"VISIBILITY_TIMEOUT_MINUTES"`
@@ -55,8 +58,27 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{}
-	if err := v.Unmarshal(cfg); err != nil {
+	err := v.Unmarshal(cfg, func(config *mapstructure.DecoderConfig) {
+		config.DecodeHook = mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+			mapstructure.StringToSliceHookFunc(","),
+		)
+	})
+	if err != nil {
 		return nil, fmt.Errorf("failed to decode config: %w", err)
+	}
+
+	// Load API_KEYS from config file map first
+	cfg.APIKeys = v.GetStringMapString("api_keys")
+
+	// Override with API_KEYS from env if present
+	if envKeys := os.Getenv("API_KEYS"); envKeys != "" {
+		cfg.APIKeys = parseAPIKeys(envKeys)
+	}
+
+	// Post-process to trim whitespace from queues
+	for i, q := range cfg.WorkerQueues {
+		cfg.WorkerQueues[i] = strings.TrimSpace(q)
 	}
 
 	if cfg.WorkerID == "" {
@@ -71,6 +93,11 @@ func Load() (*Config, error) {
 }
 
 func setDefaults(v *viper.Viper) {
+	v.SetDefault("DATABASE_URL", "")
+	v.SetDefault("REDIS_URL", "")
+	v.SetDefault("API_KEYS", map[string]string{})
+	v.SetDefault("MASTER_KEY", "apoorvsahu123456")
+	v.SetDefault("WORKER_ID", "")
 
 	v.SetDefault("PORT", "8085")
 
@@ -107,8 +134,8 @@ func validate(cfg *Config) error {
 		return errors.New("REDIS_URL is required")
 	}
 
-	if cfg.APIKey == "" {
-		return errors.New("API_KEY is required")
+	if cfg.MasterKey == "" {
+		return errors.New("MASTER_KEY is required")
 	}
 
 	return nil
@@ -138,4 +165,34 @@ func splitAndTrim(s string) []string {
 	}
 
 	return result
+}
+
+func parseAPIKeys(s string) map[string]string {
+	keys := make(map[string]string)
+
+	// Try parsing as JSON first
+	if strings.HasPrefix(s, "{") {
+		var m map[string]string
+		if err := json.Unmarshal([]byte(s), &m); err == nil {
+			return m
+		}
+	}
+
+	// Fallback to comma-separated client:key list
+	parts := strings.Split(s, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		kv := strings.SplitN(p, ":", 2)
+		if len(kv) == 2 {
+			client := strings.TrimSpace(kv[0])
+			key := strings.TrimSpace(kv[1])
+			if client != "" && key != "" {
+				keys[client] = key
+			}
+		}
+	}
+	return keys
 }

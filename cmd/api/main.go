@@ -14,7 +14,6 @@ import (
 	"github.com/apoorv/distributed-job-processor/config"
 	apihandler "github.com/apoorv/distributed-job-processor/internal/api/handler"
 	customMiddleware "github.com/apoorv/distributed-job-processor/internal/api/middleware"
-	"github.com/apoorv/distributed-job-processor/internal/metrics"
 	"github.com/apoorv/distributed-job-processor/internal/repository/postgres"
 	redisrepo "github.com/apoorv/distributed-job-processor/internal/repository/redis"
 	"github.com/apoorv/distributed-job-processor/internal/scheduler"
@@ -23,7 +22,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/joho/godotenv"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -39,9 +37,6 @@ func main() {
 	if err != nil {
 		log.Warn("env.load_failed", "error", err)
 	}
-
-	// Register Prometheus metrics at startup
-	metrics.Register()
 
 	// Config
 	cfg, err := config.Load()
@@ -66,6 +61,13 @@ func main() {
 	}
 	log.Info("db.migrations_ok")
 
+	// Seed API keys if table is empty
+	if err := db.SeedAPIKeys(ctx, cfg.APIKeys); err != nil {
+		log.Error("db.seed_api_keys_failed", "error", err)
+	} else {
+		log.Info("db.seed_api_keys_ok")
+	}
+
 	// Redis connection
 	redisClient, err := redisrepo.New(cfg.RedisURL)
 	if err != nil {
@@ -77,7 +79,7 @@ func main() {
 
 	// Services
 	jobSvc := service.NewJobService(db, redisClient, log)
-	dlqSvc := service.NewDLQService(db, log)
+	dlqSvc := service.NewDLQService(db, redisClient, log)
 
 	// Worker
 	registry := worker.NewRegistry()
@@ -104,41 +106,22 @@ func main() {
 	go sched.Start(ctx)
 	go w.Start(workerCtx)
 
-	go func() {
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-workerCtx.Done():
-				return
-			case <-ticker.C:
-				for _, queue := range cfg.WorkerQueues {
-					if n, err := redisClient.QueueDepth(ctx, queue); err == nil {
-						metrics.QueueDepth.WithLabelValues(queue, "active").Set(float64(n))
-					}
-					if n, err := redisClient.ScheduledDepth(ctx, queue); err == nil {
-						metrics.QueueDepth.WithLabelValues(queue, "scheduled").Set(float64(n))
-					}
-					if n, err := redisClient.InflightDepth(ctx, queue); err == nil {
-						metrics.QueueDepth.WithLabelValues(queue, "inflight").Set(float64(n))
-					}
-				}
-			}
-		}
-	}()
-
 	// HTTP Router
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(customMiddleware.PanicRecovery(log))
+	r.Use(customMiddleware.APIKeyAuth(db, redisClient, cfg.MasterKey, log))
 	r.Use(customMiddleware.RequestLogger(log))
-	r.Use(customMiddleware.APIKeyAuth(cfg.APIKey, log))
 
 	jobH := apihandler.NewJobHandler(jobSvc, log)
 	dlqH := apihandler.NewDLQHandler(dlqSvc, log)
+	adminH := apihandler.NewAdminHandler(db, cfg.MasterKey, log)
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Admin endpoints (APIKeyAuth middleware is bypassed internally, secured via X-Admin-Key)
+		r.Post("/admin/clients", adminH.CreateClient)
+
 		// Jobs endpoints
 		r.Post("/jobs", jobH.Submit)
 		r.Get("/jobs", jobH.List)
@@ -155,9 +138,6 @@ func main() {
 		r.Post("/dlq/purge", dlqH.Purge)
 		r.Delete("/dlq/{id}", dlqH.Delete)
 	})
-
-	// Observability + Health
-	r.Handle("/metrics", promhttp.Handler())
 
 	// Health endpoints (used by load balancers / k8s probes)
 	r.Get("/health/live", func(w http.ResponseWriter, r *http.Request) {

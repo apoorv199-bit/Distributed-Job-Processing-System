@@ -1,7 +1,9 @@
+-- +goose Up
+-- +goose StatementBegin
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 CREATE TABLE IF NOT EXISTS jobs (
-    id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     job_type        TEXT        NOT NULL,
     queue           TEXT        NOT NULL DEFAULT 'default',
     payload         JSONB       NOT NULL DEFAULT '{}',
@@ -33,3 +35,9 @@ CREATE INDEX IF NOT EXISTS idx_jobs_stalled
 -- Index for API lookups by status
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
 CREATE INDEX IF NOT EXISTS idx_jobs_queue  ON jobs (queue);
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+DROP TABLE IF EXISTS jobs;
+-- +goose StatementEnd
