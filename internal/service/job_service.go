@@ -5,19 +5,17 @@ import (
 	"log/slog"
 
 	"github.com/apoorv/distributed-job-processor/internal/domain"
-	"github.com/apoorv/distributed-job-processor/internal/repository/postgres"
-	redisrepo "github.com/apoorv/distributed-job-processor/internal/repository/redis"
 )
 
 // JobService handles all business logic for job submission and querying.
-// It sits between the HTTP handlers and the Postgres repository.
+// It sits between the HTTP handlers and the repositories.
 type JobService struct {
-	db    *postgres.DB
-	redis *redisrepo.Client
+	db    domain.JobRepository
+	redis domain.QueueBroker
 	log   *slog.Logger
 }
 
-func NewJobService(db *postgres.DB, redis *redisrepo.Client, log *slog.Logger) *JobService {
+func NewJobService(db domain.JobRepository, redis domain.QueueBroker, log *slog.Logger) *JobService {
 	return &JobService{
 		db:    db,
 		redis: redis,

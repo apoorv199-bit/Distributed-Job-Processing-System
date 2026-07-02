@@ -131,3 +131,61 @@ func (r *SubmitRequest) Validate() error {
 	}
 	return nil
 }
+
+// TimePoint represents a single data point in a time series.
+type TimePoint struct {
+	Timestamp time.Time `json:"timestamp"`
+	Count     int       `json:"count"`
+}
+
+// ThroughputData holds completed, failed, and submitted job time series.
+type ThroughputData struct {
+	Completed []TimePoint `json:"completed"`
+	Failed    []TimePoint `json:"failed"`
+	Submitted []TimePoint `json:"submitted"`
+}
+
+// LatencyStats holds processing latency percentiles in seconds.
+type LatencyStats struct {
+	Avg float64 `json:"avg"`
+	P50 float64 `json:"p50"`
+	P95 float64 `json:"p95"`
+	P99 float64 `json:"p99"`
+	Min float64 `json:"min"`
+	Max float64 `json:"max"`
+}
+
+// JobTypeStat holds job counts grouped by type and status.
+type JobTypeStat struct {
+	JobType string `json:"job_type"`
+	Status  string `json:"status"`
+	Count   int    `json:"count"`
+}
+
+// WorkerStat holds performance metrics per worker.
+type WorkerStat struct {
+	WorkerID  string `json:"worker_id"`
+	Completed int    `json:"completed"`
+	Failed    int    `json:"failed"`
+	Total     int    `json:"total"`
+}
+
+// ErrorStat holds error frequency data.
+type ErrorStat struct {
+	JobType   string `json:"job_type"`
+	LastError string `json:"last_error"`
+	Count     int    `json:"count"`
+}
+
+// RetryStat holds retry attempt count distribution.
+type RetryStat struct {
+	AttemptCount int `json:"attempt_count"`
+	Count        int `json:"count"`
+}
+
+// DLQQueueStat holds DLQ statistics per queue.
+type DLQQueueStat struct {
+	Queue         string `json:"queue"`
+	Total         int    `json:"total"`
+	PendingReplay int    `json:"pending_replay"`
+}

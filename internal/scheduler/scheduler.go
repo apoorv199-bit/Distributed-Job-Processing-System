@@ -4,9 +4,16 @@ import (
 	"context"
 	"log/slog"
 	"time"
-
-	redisrepo "github.com/apoorv/distributed-job-processor/internal/repository/redis"
 )
+
+// SchedulerBroker defines the subset of broker operations needed by the scheduler.
+type SchedulerBroker interface {
+	AcquireLock(ctx context.Context, key, val string) (bool, error)
+	ReleaseLock(ctx context.Context, key, val string) error
+	RenewLock(ctx context.Context, key, val string) (bool, error)
+	PromoteScheduled(ctx context.Context, queue string, priority int) (int, error)
+	ReclaimExpiredInflight(ctx context.Context, queue string, priority int) (int, error)
+}
 
 // Scheduler is a singleton process responsible for two jobs:
 //  1. Promoting scheduled jobs (run_at <= now) into the active queue
@@ -17,7 +24,7 @@ import (
 type Scheduler struct {
 	id                string // unique ID for this instance (use hostname + PID)
 	queues            []string
-	redis             *redisrepo.Client
+	redis             SchedulerBroker
 	log               *slog.Logger
 	pollInterval      time.Duration
 	visibilityTimeout time.Duration
@@ -30,7 +37,7 @@ type Config struct {
 	VisibilityTimeout time.Duration
 }
 
-func New(cfg Config, redis *redisrepo.Client, log *slog.Logger) *Scheduler {
+func New(cfg Config, redis SchedulerBroker, log *slog.Logger) *Scheduler {
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 1 * time.Second
 	}

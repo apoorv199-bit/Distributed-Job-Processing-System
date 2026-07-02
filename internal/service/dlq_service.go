@@ -7,18 +7,16 @@ import (
 	"time"
 
 	"github.com/apoorv/distributed-job-processor/internal/domain"
-	"github.com/apoorv/distributed-job-processor/internal/repository/postgres"
-	redisrepo "github.com/apoorv/distributed-job-processor/internal/repository/redis"
 )
 
 // DLQService handles all business logic for dead-letter queue operations.
 type DLQService struct {
-	db    *postgres.DB
-	redis *redisrepo.Client
+	db    domain.DLQRepository
+	redis domain.QueueBroker
 	log   *slog.Logger
 }
 
-func NewDLQService(db *postgres.DB, redis *redisrepo.Client, log *slog.Logger) *DLQService {
+func NewDLQService(db domain.DLQRepository, redis domain.QueueBroker, log *slog.Logger) *DLQService {
 	return &DLQService{db: db, redis: redis, log: log}
 }
 

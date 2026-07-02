@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -13,13 +14,17 @@ import (
 	"github.com/apoorv/distributed-job-processor/internal/repository/postgres"
 )
 
+type ClientCreator interface {
+	CreateClientAPIKey(ctx context.Context, clientID, prefix, hashedKey string) error
+}
+
 type AdminHandler struct {
-	db        *postgres.DB
+	db        ClientCreator
 	masterKey string
 	log       *slog.Logger
 }
 
-func NewAdminHandler(db *postgres.DB, masterKey string, log *slog.Logger) *AdminHandler {
+func NewAdminHandler(db ClientCreator, masterKey string, log *slog.Logger) *AdminHandler {
 	return &AdminHandler{
 		db:        db,
 		masterKey: masterKey,

@@ -284,48 +284,6 @@ func (db *DB) GetAttempts(ctx context.Context, jobID string) ([]*domain.JobAttem
 	return attempts, nil
 }
 
-// Dequeue atomically claims the next available job from the given queue.
-//
-// How it works:
-//   - The subquery finds the BEST candidate (priority ASC, run_at ASC)
-//   - FOR UPDATE acquires a row lock on that candidate
-//   - SKIP LOCKED means: if the row is already locked by another worker,
-//     skip it and try the next one — zero contention between workers
-//   - The UPDATE marks it running atomically within the same statement
-//
-// This is the correct way to build a job queue on Postgres.
-// Do NOT use a SELECT then a separate UPDATE — that's a race condition.
-func (db *DB) Dequeue(ctx context.Context, queue, workerID string) (*domain.Job, error) {
-	const q = `
-		UPDATE jobs
-		SET status        = 'running',
-		    started_at    = NOW(),
-		    worker_id     = $2,
-		    attempt_count = attempt_count + 1,
-		    updated_at    = NOW()
-		WHERE id = (
-			SELECT id
-			FROM   jobs
-			WHERE  queue  = $1
-			  AND  status = 'pending'
-			  AND  run_at <= NOW()
-			ORDER BY priority ASC, run_at ASC
-			FOR UPDATE SKIP LOCKED
-			LIMIT 1
-		)
-		RETURNING id, client_id, job_type, queue, payload, status, priority,
-		          max_attempts, attempt_count, run_at,
-		          started_at, completed_at, failed_at,
-		          worker_id, last_error, idempotency_key, COALESCE(request_hash, ''), created_at, updated_at`
-
-	row := db.pool.QueryRow(ctx, q, queue, workerID)
-	job, err := scanJob(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil // queue is empty — not an error
-	}
-	return job, err
-}
-
 // ReclaimStalledJobs resets jobs that have been stuck in 'running' for longer
 // than visibilityTimeout. This handles worker crashes.
 // Returns the number of jobs reclaimed.

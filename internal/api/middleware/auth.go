@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apoorv/distributed-job-processor/internal/domain"
 	"github.com/apoorv/distributed-job-processor/internal/repository/postgres"
-	redisrepo "github.com/apoorv/distributed-job-processor/internal/repository/redis"
 )
 
 type ContextKey string
@@ -18,7 +18,7 @@ type ContextKey string
 const ClientNameKey ContextKey = "client_id"
 
 // APIKeyAuth protects routes using Database-backed and Redis-cached key lookup.
-func APIKeyAuth(db *postgres.DB, redisClient *redisrepo.Client, masterKey string, log *slog.Logger) func(next http.Handler) http.Handler {
+func APIKeyAuth(db domain.JobRepository, redisClient domain.QueueBroker, masterKey string, log *slog.Logger) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
@@ -97,4 +97,18 @@ func APIKeyAuth(db *postgres.DB, redisClient *redisrepo.Client, masterKey string
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// RequireAdmin ensures that the authenticated client in context is 'admin'.
+func RequireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientID, _ := r.Context().Value(ClientNameKey).(string)
+		if clientID != "admin" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"forbidden: admin credentials required"}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

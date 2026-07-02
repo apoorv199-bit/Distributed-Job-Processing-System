@@ -10,21 +10,20 @@ import (
 	"github.com/apoorv/distributed-job-processor/config"
 	"github.com/apoorv/distributed-job-processor/internal/domain"
 	"github.com/apoorv/distributed-job-processor/internal/ratelimiter"
-	"github.com/apoorv/distributed-job-processor/internal/repository/postgres"
-	redisrepo "github.com/apoorv/distributed-job-processor/internal/repository/redis"
 )
 
+// Database defines the subset of repository methods required by the worker.
+type Database interface {
+	domain.JobRepository
+	MoveToDLQ(ctx context.Context, job *domain.Job, lastError string) (*domain.DeadLetterJob, error)
+}
+
 // Worker polls one or more queues and executes jobs using a bounded goroutine pool.
-//
-// Architecture:
-//   - N goroutines (= concurrency) each run an independent poll loop
-//   - A semaphore (buffered channel) caps the number of concurrently executing jobs
-//   - Graceful shutdown: stop accepting new jobs, drain in-flight jobs, then exit
 type Worker struct {
 	id          string
 	queues      []string // polled left-to-right (put highest priority queue first)
 	concurrency int
-	db          *postgres.DB
+	db          Database
 	registry    *Registry
 	log         *slog.Logger
 
@@ -38,7 +37,7 @@ type Worker struct {
 	// visibilityTimeout is used by the reaper goroutine.
 	visibilityTimeout time.Duration
 
-	redis       *redisrepo.Client
+	redis       domain.QueueBroker
 	rateLimiter *ratelimiter.RateLimiter
 }
 
@@ -50,7 +49,7 @@ type Config struct {
 	RateLimitConfig   config.RateLimitConfig
 }
 
-func New(cfg Config, db *postgres.DB, redis *redisrepo.Client, registry *Registry, log *slog.Logger) *Worker {
+func New(cfg Config, db Database, redis domain.QueueBroker, registry *Registry, log *slog.Logger) *Worker {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 10
 	}
